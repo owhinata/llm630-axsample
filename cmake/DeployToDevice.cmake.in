@@ -1,0 +1,71 @@
+cmake_minimum_required(VERSION 3.20)
+
+find_program(ADB_EXECUTABLE adb)
+if(NOT ADB_EXECUTABLE)
+    message(FATAL_ERROR "adb not found on host; cannot deploy via rsync")
+endif()
+
+find_program(RSYNC_EXECUTABLE rsync)
+if(NOT RSYNC_EXECUTABLE)
+    message(FATAL_ERROR "rsync not found on host; cannot deploy via rsync")
+endif()
+
+if(NOT DEFINED ENV{USER})
+    message(FATAL_ERROR "USER environment variable not set; cannot derive remote username")
+endif()
+set(_host_username "$ENV{USER}")
+
+set(_forward_port "")
+execute_process(
+    COMMAND "${ADB_EXECUTABLE}" forward --list
+    RESULT_VARIABLE _forward_result
+    OUTPUT_VARIABLE _forward_output
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_VARIABLE _forward_error
+)
+
+if(NOT _forward_result EQUAL 0)
+    message(FATAL_ERROR "adb forward --list failed: ${_forward_error}")
+endif()
+
+if(NOT _forward_output STREQUAL "")
+    string(REGEX MATCH "tcp:([0-9]+)[ \t]+tcp:22" _forward_match "${_forward_output}")
+    if(_forward_match)
+        string(REGEX REPLACE ".*tcp:([0-9]+)[ \t]+tcp:22.*" "\\1" _forward_port "${_forward_output}")
+        message(STATUS "Using existing adb forward tcp:${_forward_port} -> tcp:22")
+    endif()
+endif()
+
+if(_forward_port STREQUAL "")
+    set(_forward_port "2222")
+    execute_process(
+        COMMAND "${ADB_EXECUTABLE}" forward tcp:${_forward_port} tcp:22
+        RESULT_VARIABLE _forward_create_result
+        ERROR_VARIABLE _forward_create_error
+    )
+    if(NOT _forward_create_result EQUAL 0)
+        message(FATAL_ERROR "adb forward tcp:${_forward_port} tcp:22 failed: ${_forward_create_error}")
+    endif()
+    message(STATUS "Configured adb forward tcp:${_forward_port} -> tcp:22")
+endif()
+
+set(_ssh_command "ssh -p ${_forward_port}")
+set(_remote_path "/home/${_host_username}/work/llm630-axsample/")
+
+message(STATUS "Synchronising project to ${_remote_path} via rsync")
+
+execute_process(
+    COMMAND "${RSYNC_EXECUTABLE}" -avz --delete
+            --exclude ".git/" --exclude "toolchain/"
+            -e "${_ssh_command}"
+            "@PROJECT_SOURCE_DIR@/"
+            "${_host_username}@localhost:${_remote_path}"
+    RESULT_VARIABLE _rsync_result
+    ERROR_VARIABLE _rsync_error
+)
+
+if(NOT _rsync_result EQUAL 0)
+    message(FATAL_ERROR "rsync failed: ${_rsync_error}")
+endif()
+
+message(STATUS "Deployment complete via adb forward tcp:${_forward_port}")

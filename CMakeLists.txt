@@ -120,3 +120,12 @@ if(NOT EXISTS "${AXERA_SUBMODULE_DIR}/README.md")
 endif()
 
 add_subdirectory(cpp)
+
+set(LLM630_DEPLOY_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/llm630_deploy.cmake")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/DeployToDevice.cmake.in"
+    "${LLM630_DEPLOY_SCRIPT}"
+    @ONLY
+)
+
+install(SCRIPT "${LLM630_DEPLOY_SCRIPT}")
