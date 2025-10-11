@@ -1,5 +1,23 @@
 cmake_minimum_required(VERSION 3.20)
 
+set(_llm630_build_args --build "@CMAKE_BINARY_DIR@")
+if(CMAKE_INSTALL_CONFIG_NAME)
+    list(APPEND _llm630_build_args --config "${CMAKE_INSTALL_CONFIG_NAME}")
+elseif("@CMAKE_BUILD_TYPE@" AND NOT "@CMAKE_BUILD_TYPE@" STREQUAL "")
+    list(APPEND _llm630_build_args --config "@CMAKE_BUILD_TYPE@")
+endif()
+
+message(STATUS "Building project before deployment")
+execute_process(
+    COMMAND "@CMAKE_COMMAND@" ${_llm630_build_args}
+    RESULT_VARIABLE _llm630_build_result
+    ERROR_VARIABLE _llm630_build_error
+)
+
+if(NOT _llm630_build_result EQUAL 0)
+    message(FATAL_ERROR "cmake --build failed: ${_llm630_build_error}")
+endif()
+
 find_program(ADB_EXECUTABLE adb)
 if(NOT ADB_EXECUTABLE)
     message(FATAL_ERROR "adb not found on host; cannot deploy via rsync")
