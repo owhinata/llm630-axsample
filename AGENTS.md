@@ -2,6 +2,7 @@
 
 1. **Reference Samples**  
    - Use the existing sources under `ax620e_bsp_sdk/msp/sample` as the primary reference when creating new examples in `cpp/`.
+   - 着手前に `knowledge/` ディレクトリのメモ（例: `ax620e_bsp_sdk_sc850sl.md`）を確認し、必要なヘッダ／ライブラリ／リソースの位置を把握してから `ax620e_bsp_sdk/` を参照すること。
 
 2. **Coding Standards**  
    - All C++ code must follow the Google C++ Style Guide.
