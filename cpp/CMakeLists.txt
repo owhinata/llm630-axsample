@@ -30,3 +30,4 @@ endfunction()
 
 add_subdirectory(hello_world)
 add_subdirectory(sample_sysmap)
+add_subdirectory(sample_sysmap_ax)
