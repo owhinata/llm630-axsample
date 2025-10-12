@@ -1,2 +1,10 @@
 toolchain/
 build/
+
+# Vim swap files
+*.swp
+*.swo
+*.swpx
+.*.swp
+.*.swo
+.*.swpx
