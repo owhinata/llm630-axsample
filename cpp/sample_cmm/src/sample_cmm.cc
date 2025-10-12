@@ -28,6 +28,22 @@ class SystemGuard {
   bool ok_;
 };
 
+// [001]
+// Purpose:
+//   Basic sanity for non-cached allocation + mapping. Verifies that a
+//   physically contiguous CMM block can be allocated and mapped to a virtual
+//   address without using the cached path.
+//
+// Steps and underlying AX_SYS calls (via libax_sys_cpp):
+//   1) CmmBuffer::Allocate(size, kNonCached, token)
+//      - AX_SYS_MemAlloc(..., size, ...)
+//      - AX_SYS_Mmap(phys, size)
+//   2) Print physical and virtual addresses for visibility.
+//   3) (No explicit free in this sample; process teardown releases resources.)
+//
+// Expected result:
+//   - Non-null virtual address and non-zero physical address are printed.
+//   - No errors or crashes; mapping succeeds in non-cached mode.
 void Case001() {
   printf("[001] MemAlloc/MemFree (non-cached)\n");
   axsys::CmmBuffer buf;
