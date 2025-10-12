@@ -13,3 +13,4 @@
 
 4. **Commit Policy**  
    - Do **not** create commits without explicit reviewer approval. Keep changes staged locally until a review is complete.
+   - Commit messages must fit on a single subject line within 72 characters. Use imperative mood and avoid trailing periods.
