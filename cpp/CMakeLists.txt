@@ -29,3 +29,4 @@ function(llm630_enable_contribution_checks target)
 endfunction()
 
 add_subdirectory(hello_world)
+add_subdirectory(sample_sysmap)
