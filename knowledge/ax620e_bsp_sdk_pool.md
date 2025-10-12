@@ -76,5 +76,7 @@
   - 発生条件: ブロックを保持したまま `AX_POOL_MunmapPool` や `AX_POOL_DestroyPool` を実行。
   - 回避策: 使用後は必ず「ReleaseBlock → MunmapPool → DestroyPool」の順で処理する。
   - 実装例: `BlockGuard::Release()` を呼んだ後に `PoolMapping::Unmap()`、最後に `AX_POOL_DestroyPool()`。
+  - 備考: リファレンスサンプル（ax620e_bsp_sdk/msp/sample/pool/sample_pool.c）も
+    この順序（ReleaseBlock → MunmapPool → DestroyPool）で実装されている。
 
 このメモを起点に、`cpp/sample_pool` へ C++ 版サンプルを実装してください。
