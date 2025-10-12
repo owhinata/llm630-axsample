@@ -1,98 +1,169 @@
+// AXERA SDK
 #include <ax_sys_api.h>
+
+// C system headers
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/time.h>
 #include <unistd.h>
 
+// C++ headers
+#include <chrono>
 #include <cstdint>
 
 namespace {
+
 constexpr uint32_t kTestLen = 0x1200000;  // 18 MiB
+constexpr int kCopies = 50;
 
-void PrintElapsed(const timeval& start, const timeval& end,
-                  uint64_t bytes_per_copy, int copies) {
-  int64_t sec = static_cast<int64_t>(end.tv_sec - start.tv_sec);
-  int64_t usec = (end.tv_sec - start.tv_sec)
-                     ? (end.tv_usec - start.tv_usec + 1000000)
-                     : (end.tv_usec - start.tv_usec);
-  const double total_sec =
-      static_cast<double>(sec) + static_cast<double>(usec) / 1e6;
-  const double per_copy_sec = (copies > 0) ? (total_sec / copies) : total_sec;
-  const double mib = static_cast<double>(bytes_per_copy) / (1024.0 * 1024.0);
-  printf("data size: %" PRIu64 " bytes (%.2f MiB)\n",
-         static_cast<uint64_t>(bytes_per_copy), mib);
-  printf("time: %.6f sec for %d copies\n", total_sec, copies);
-  printf("      %.6f sec per %" PRIu64 " bytes (%.2f MiB)\n", per_copy_sec,
-         static_cast<uint64_t>(bytes_per_copy), mib);
-}
+class ThroughputTimer {
+ public:
+  void Start() { start_ = std::chrono::steady_clock::now(); }
+  void StopAndReport(uint64_t bytes_per_copy, int copies) {
+    auto end = std::chrono::steady_clock::now();
+    const double total_sec =
+        std::chrono::duration<double>(end - start_).count();
+    const double per_copy_sec = (copies > 0) ? (total_sec / copies) : total_sec;
+    const double mib = static_cast<double>(bytes_per_copy) / (1024.0 * 1024.0);
+    printf("data size: %" PRIu64 " bytes (%.2f MiB)\n",
+           static_cast<uint64_t>(bytes_per_copy), mib);
+    printf("time: %.6f sec for %d copies\n", total_sec, copies);
+    printf("      %.6f sec per %" PRIu64 " bytes (%.2f MiB)\n", per_copy_sec,
+           static_cast<uint64_t>(bytes_per_copy), mib);
+  }
 
-int DoTestUncached(AX_U64 phys_src, void* virt_src, AX_U64 phys_dst,
-                   void* virt_dst) {
-  // Optional: query block info for demonstration.
-  AX_S32 mem_type_src = 0, mem_type_dst = 0;
-  void* back_virt_src = nullptr;
-  void* back_virt_dst = nullptr;
-  AX_U32 blk_size_src = 0, blk_size_dst = 0;
-  AX_SYS_MemGetBlockInfoByPhy(phys_src, &mem_type_src, &back_virt_src,
-                              &blk_size_src);
-  AX_SYS_MemGetBlockInfoByPhy(phys_dst, &mem_type_dst, &back_virt_dst,
-                              &blk_size_dst);
+ private:
+  std::chrono::steady_clock::time_point start_{};
+};
 
-  // Sanity copy + verify like the original sample.
+class BufferPair {
+ public:
+  BufferPair()
+      : phys_src(0), phys_dst(0), virt_src(nullptr), virt_dst(nullptr) {}
+  bool Allocate(bool cached, const char* token) {
+    if (!cached) {
+      if (AX_SYS_MemAlloc(&phys_src, &virt_src, kTestLen, 0x4,
+                          reinterpret_cast<const AX_S8*>(token)) < 0) {
+        printf("alloc src (non-cached) failed\n");
+        return false;
+      }
+      if (AX_SYS_MemAlloc(&phys_dst, &virt_dst, kTestLen, 0x4,
+                          reinterpret_cast<const AX_S8*>(token)) < 0) {
+        printf("alloc dst (non-cached) failed\n");
+        AX_SYS_MemFree(phys_src, virt_src);
+        phys_src = 0;
+        virt_src = nullptr;
+        return false;
+      }
+    } else {
+      if (AX_SYS_MemAllocCached(&phys_src, &virt_src, kTestLen, 0x4,
+                                reinterpret_cast<const AX_S8*>(token)) < 0) {
+        printf("alloc src (cached) failed\n");
+        return false;
+      }
+      if (AX_SYS_MemAllocCached(&phys_dst, &virt_dst, kTestLen, 0x4,
+                                reinterpret_cast<const AX_S8*>(token)) < 0) {
+        printf("alloc dst (cached) failed\n");
+        AX_SYS_MemFree(phys_src, virt_src);
+        phys_src = 0;
+        virt_src = nullptr;
+        return false;
+      }
+    }
+    return true;
+  }
+  void Free() {
+    if (phys_src || virt_src) AX_SYS_MemFree(phys_src, virt_src);
+    if (phys_dst || virt_dst) AX_SYS_MemFree(phys_dst, virt_dst);
+    phys_src = phys_dst = 0;
+    virt_src = virt_dst = nullptr;
+  }
+  AX_U64 phys_src;
+  AX_U64 phys_dst;
+  void* virt_src;
+  void* virt_dst;
+};
+
+class SysmapMapper {
+ public:
+  explicit SysmapMapper(bool cached)
+      : cached_(cached),
+        map_src_(nullptr),
+        map_dst_(nullptr),
+        phys_src_(0),
+        phys_dst_(0) {}
+  bool Open() { return true; }
+  bool Map(AX_U64 phys_src, AX_U64 phys_dst) {
+    phys_src_ = phys_src;
+    phys_dst_ = phys_dst;
+    AX_S32 mem_type = 0;
+    AX_U32 blk_size = 0;
+    AX_VOID* vaddr = nullptr;
+    if (AX_SYS_MemGetBlockInfoByPhy(phys_src_, &mem_type, &vaddr, &blk_size) !=
+        0) {
+      printf("AX_SYS_MemGetBlockInfoByPhy(src) failed\n");
+      return false;
+    }
+    map_src_ = static_cast<char*>(vaddr);
+    vaddr = nullptr;
+    if (AX_SYS_MemGetBlockInfoByPhy(phys_dst_, &mem_type, &vaddr, &blk_size) !=
+        0) {
+      printf("AX_SYS_MemGetBlockInfoByPhy(dst) failed\n");
+      map_src_ = nullptr;
+      return false;
+    }
+    map_dst_ = static_cast<char*>(vaddr);
+    if (cached_) {
+      AX_SYS_MinvalidateCache(phys_src_, map_src_, kTestLen);
+      AX_SYS_MinvalidateCache(phys_dst_, map_dst_, kTestLen);
+    }
+    return true;
+  }
+  void Unmap() {
+    if (cached_) {
+      AX_SYS_MflushCache(phys_src_, map_src_, kTestLen);
+      AX_SYS_MflushCache(phys_dst_, map_dst_, kTestLen);
+    }
+    map_src_ = map_dst_ = nullptr;
+  }
+  char* Src() const { return map_src_; }
+  char* Dst() const { return map_dst_; }
+
+ private:
+  bool cached_;
+  char* map_src_;
+  char* map_dst_;
+  AX_U64 phys_src_;
+  AX_U64 phys_dst_;
+};
+
+void SanityCopy(char* dst, const char* src) {
   for (int i = 0; i < 0x20; ++i) {
-    memcpy(static_cast<char*>(virt_src) + i, static_cast<char*>(virt_dst) + i,
-           kTestLen - i);
-    if (memcmp(static_cast<char*>(virt_src) + i,
-               static_cast<char*>(virt_dst) + i, kTestLen - i) != 0) {
+    memcpy(dst + i, src + i, kTestLen - i);
+    if (memcmp(dst + i, src + i, kTestLen - i) != 0) {
       printf("memcpy fail, i: %x\n", i);
     }
   }
-
-  // Measure memcpy throughput.
-  constexpr int kCopies = 50;
-  timeval start{}, end{};
-  gettimeofday(&start, nullptr);
-  for (int i = 0; i < kCopies; ++i) {
-    memcpy(virt_src, virt_dst, kTestLen);
-  }
-  gettimeofday(&end, nullptr);
-  PrintElapsed(start, end, kTestLen, kCopies);
-
-  return 0;
 }
 
-int DoTestCached(AX_U64 phys_src, void* virt_src, AX_U64 phys_dst,
-                 void* virt_dst) {
-  // Optional: ensure cache lines are in a known state.
-  AX_SYS_MinvalidateCache(phys_src, virt_src, kTestLen);
-  AX_SYS_MinvalidateCache(phys_dst, virt_dst, kTestLen);
+bool RunOneCase(bool cached, const BufferPair& bufs) {
+  SysmapMapper mapper(cached);
+  if (!mapper.Open()) return false;
+  if (!mapper.Map(bufs.phys_src, bufs.phys_dst)) return false;
 
-  // Sanity copy + verify like the original sample.
-  for (int i = 0; i < 0x20; ++i) {
-    memcpy(static_cast<char*>(virt_src) + i, static_cast<char*>(virt_dst) + i,
-           kTestLen - i);
-    if (memcmp(static_cast<char*>(virt_src) + i,
-               static_cast<char*>(virt_dst) + i, kTestLen - i) != 0) {
-      printf("memcpy fail, i: %x\n", i);
-    }
-  }
+  SanityCopy(mapper.Src(), mapper.Dst());
 
-  constexpr int kCopies = 50;
-  timeval start{}, end{};
-  gettimeofday(&start, nullptr);
+  ThroughputTimer t;
+  t.Start();
   for (int i = 0; i < kCopies; ++i) {
-    memcpy(virt_src, virt_dst, kTestLen);
+    memcpy(mapper.Src(), mapper.Dst(), kTestLen);
   }
-  gettimeofday(&end, nullptr);
+  t.StopAndReport(kTestLen, kCopies);
 
-  // Optional: flush after writes to push data out of CPU cache (not timed).
-  AX_SYS_MflushCache(phys_src, virt_src, kTestLen);
-  AX_SYS_MflushCache(phys_dst, virt_dst, kTestLen);
-
-  PrintElapsed(start, end, kTestLen, kCopies);
-  return 0;
+  mapper.Unmap();
+  return true;
 }
+
 }  // namespace
 
 int main() {
@@ -101,58 +172,31 @@ int main() {
     return -1;
   }
 
-  // Uncached pair
-  AX_U64 phys_src_nc = 0, phys_dst_nc = 0;
-  void* virt_src_nc = nullptr;
-  void* virt_dst_nc = nullptr;
-  if (AX_SYS_MemAlloc(&phys_src_nc, &virt_src_nc, kTestLen, 0x4,
-                      (const AX_S8*)"ax_sysmap_ax_nc") < 0) {
-    printf("alloc src (non-cached) failed\n");
+  BufferPair uncached;
+  if (!uncached.Allocate(false, "ax_sysmap_ax_nc")) {
     return -1;
   }
-  if (AX_SYS_MemAlloc(&phys_dst_nc, &virt_dst_nc, kTestLen, 0x4,
-                      (const AX_S8*)"ax_sysmap_ax_nc") < 0) {
-    printf("alloc dst (non-cached) failed\n");
-    AX_SYS_MemFree(phys_src_nc, virt_src_nc);
-    return -1;
-  }
-
-  // Cached pair
-  AX_U64 phys_src_c = 0, phys_dst_c = 0;
-  void* virt_src_c = nullptr;
-  void* virt_dst_c = nullptr;
-  if (AX_SYS_MemAllocCached(&phys_src_c, &virt_src_c, kTestLen, 0x4,
-                            (const AX_S8*)"ax_sysmap_ax_c") < 0) {
-    printf("alloc src (cached) failed\n");
-    AX_SYS_MemFree(phys_src_nc, virt_src_nc);
-    AX_SYS_MemFree(phys_dst_nc, virt_dst_nc);
-    return -1;
-  }
-  if (AX_SYS_MemAllocCached(&phys_dst_c, &virt_dst_c, kTestLen, 0x4,
-                            (const AX_S8*)"ax_sysmap_ax_c") < 0) {
-    printf("alloc dst (cached) failed\n");
-    AX_SYS_MemFree(phys_src_nc, virt_src_nc);
-    AX_SYS_MemFree(phys_dst_nc, virt_dst_nc);
-    AX_SYS_MemFree(phys_src_c, virt_src_c);
+  BufferPair cached;
+  if (!cached.Allocate(true, "ax_sysmap_ax_c")) {
+    uncached.Free();
     return -1;
   }
 
   printf("malloc phy addr (uncached): %" PRIx64 ", %" PRIx64 "\n",
-         static_cast<uint64_t>(phys_src_nc),
-         static_cast<uint64_t>(phys_dst_nc));
+         static_cast<uint64_t>(uncached.phys_src),
+         static_cast<uint64_t>(uncached.phys_dst));
   printf("malloc phy addr (cached):   %" PRIx64 ", %" PRIx64 "\n",
-         static_cast<uint64_t>(phys_src_c), static_cast<uint64_t>(phys_dst_c));
+         static_cast<uint64_t>(cached.phys_src),
+         static_cast<uint64_t>(cached.phys_dst));
 
   printf("Test uncached\n");
-  DoTestUncached(phys_src_nc, virt_src_nc, phys_dst_nc, virt_dst_nc);
+  RunOneCase(false, uncached);
 
   printf("Test cached\n");
-  DoTestCached(phys_src_c, virt_src_c, phys_dst_c, virt_dst_c);
+  RunOneCase(true, cached);
 
-  AX_SYS_MemFree(phys_src_nc, virt_src_nc);
-  AX_SYS_MemFree(phys_dst_nc, virt_dst_nc);
-  AX_SYS_MemFree(phys_src_c, virt_src_c);
-  AX_SYS_MemFree(phys_dst_c, virt_dst_c);
+  uncached.Free();
+  cached.Free();
 
   printf("sysmap_ax test pass\n");
   return 0;
