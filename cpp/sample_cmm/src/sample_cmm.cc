@@ -5,20 +5,14 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
-// C++ headers
-#include <chrono>
-#include <cstdint>
+// libax_sys_cpp
+#include "axsys/cmm.hpp"
 
 namespace {
 
 constexpr uint32_t kLen = 2 * 1024 * 1024;  // 2 MiB
-constexpr uint32_t kAlign = 64;
-
-enum class CacheMode {
-  kNonCached = 0,
-  kCached = 1,
-};
 
 class SystemGuard {
  public:
@@ -28,270 +22,82 @@ class SystemGuard {
   ~SystemGuard() {
     if (ok_) AX_SYS_Deinit();
   }
-  bool ok() const { return ok_; }
+  bool Ok() const { return ok_; }
 
  private:
   bool ok_;
 };
 
-class Timer {
- public:
-  void Start() { start_ = std::chrono::steady_clock::now(); }
-  void StopPrint(const char* label) {
-    auto end = std::chrono::steady_clock::now();
-    double sec = std::chrono::duration<double>(end - start_).count();
-    printf("%s: %.6f sec\n", label, sec);
-  }
-
- private:
-  std::chrono::steady_clock::time_point start_{};
-};
-
-struct Buf {
-  AX_U64 phy{0};
-  void* vir{nullptr};
-};
-
-// Simple address buffer descriptor compatible with memcpy helper.
-struct AddrBuf {
-  AX_U64 phy;
-  void* vir;
-  bool is_cached;
-};
-
-static int MemcpyFunc(const AddrBuf& src, const AddrBuf& dst, uint32_t size) {
-  void* psrc = nullptr;
-  void* pdst = nullptr;
-  if (src.is_cached) {
-    psrc = AX_SYS_Mmap(src.phy, size);
-    if (!psrc) {
-      printf("AX_SYS_Mmap pSrcVirAddr failed\n");
-      return -1;
-    }
-  } else {
-    psrc = src.vir;
-  }
-  if (dst.is_cached) {
-    pdst = AX_SYS_Mmap(dst.phy, size);
-    if (!pdst) {
-      if (psrc && psrc != src.vir) AX_SYS_Munmap(psrc, size);
-      printf("AX_SYS_Mmap pDstVirAddr failed\n");
-      return -1;
-    }
-  } else {
-    pdst = dst.vir;
-  }
-  memcpy(pdst, psrc, size);
-  if (psrc && psrc != src.vir) AX_SYS_Munmap(psrc, size);
-  if (pdst && pdst != dst.vir) AX_SYS_Munmap(pdst, size);
-  return 0;
-}
-
-class CmmMapper {
- public:
-  CmmMapper() = default;
-  ~CmmMapper() { Unmap(); }
-  bool Map(AX_U64 phy, uint32_t size, CacheMode mode) {
-    size_ = size;
-    if (mode == CacheMode::kCached) {
-      vir_ = AX_SYS_MmapCache(phy, size);
-    } else {
-      vir_ = AX_SYS_Mmap(phy, size);
-    }
-    if (!vir_) {
-      printf("AX_SYS_Mmap(%s) failed\n",
-             (mode == CacheMode::kCached) ? "cache" : "noncache");
-      return false;
-    }
-    return true;
-  }
-  bool Unmap() {
-    if (vir_) {
-      AX_S32 ret = AX_SYS_Munmap(vir_, size_);
-      if (ret != 0) {
-        printf("AX_SYS_Munmap failed: 0x%X\n", static_cast<unsigned int>(ret));
-        return false;
-      }
-      vir_ = nullptr;
-      size_ = 0;
-    }
-    return true;
-  }
-  void* vir() const { return vir_; }
-
- private:
-  void* vir_{nullptr};
-  uint32_t size_{0};
-};
-
-class CmmBuffer {
- public:
-  CmmBuffer() = default;
-  ~CmmBuffer() { Free(); }
-
-  bool Alloc(uint32_t size, CacheMode mode, const char* token) {
-    cache_mode_ = mode;
-    if (mode == CacheMode::kCached) {
-      if (AX_SYS_MemAllocCached(&buf_.phy, &buf_.vir, size, kAlign,
-                                reinterpret_cast<const AX_S8*>(token)) < 0) {
-        printf("AX_SYS_MemAllocCached failed\n");
-        return false;
-      }
-    } else {
-      if (AX_SYS_MemAlloc(&buf_.phy, &buf_.vir, size, kAlign,
-                          reinterpret_cast<const AX_S8*>(token)) < 0) {
-        printf("AX_SYS_MemAlloc failed\n");
-        return false;
-      }
-    }
-    return true;
-  }
-
-  bool Map(uint32_t offset, uint32_t size) {
-    if (!buf_.phy) return false;
-    if (mapper_.vir()) return true;  // already mapped
-    return mapper_.Map(buf_.phy + offset, size, cache_mode_);
-  }
-
-  bool Unmap() { return mapper_.Unmap(); }
-
-  void Free() {
-    // Unmap first if mapped
-    mapper_.Unmap();
-    if (buf_.phy || buf_.vir) {
-      AX_S32 ret = AX_SYS_MemFree(buf_.phy, buf_.vir);
-      if (ret != 0) {
-        printf("AX_SYS_MemFree failed: 0x%X (phy=0x%" PRIx64 ")\n",
-               static_cast<unsigned int>(ret), static_cast<uint64_t>(buf_.phy));
-      }
-      buf_.phy = 0;
-      buf_.vir = nullptr;
-    }
-  }
-
-  AX_U64 phy() const { return buf_.phy; }
-  void* vir() const { return buf_.vir; }
-  void* map() const { return mapper_.vir(); }
-  CacheMode cache_mode() const { return cache_mode_; }
-
-  // Implicit conversion to AddrBuf for helper interop.
-  operator AddrBuf() const {
-    return AddrBuf{buf_.phy, buf_.vir, cache_mode_ == CacheMode::kCached};
-  }
-
- private:
-  Buf buf_{};
-  CmmMapper mapper_{};
-  CacheMode cache_mode_{CacheMode::kNonCached};
-};
-
 void Case001() {
   printf("[001] MemAlloc/MemFree (non-cached)\n");
-  CmmBuffer b;
-  if (!b.Alloc(kLen, CacheMode::kNonCached, "cmm_001")) return;
-  printf("  phy=0x%" PRIx64 ", vir=0x%" PRIuPTR "\n",
-         static_cast<uint64_t>(b.phy()), reinterpret_cast<uintptr_t>(b.vir()));
+  axsys::CmmBuffer buf;
+  axsys::CmmView v =
+      buf.Allocate(kLen, axsys::CacheMode::kNonCached, "cmm_001");
+  printf("  phy=0x%" PRIx64 ", v=0x%" PRIuPTR "\n",
+         static_cast<uint64_t>(buf.Phys()),
+         reinterpret_cast<uintptr_t>(v.Data()));
 }
 
 void Case002() {
   printf("[002] MemAllocCached/MemFree (cached)\n");
-  CmmBuffer b;
-  if (!b.Alloc(kLen, CacheMode::kCached, "cmm_002")) return;
-  printf("  phy=0x%" PRIx64 ", vir=0x%" PRIuPTR "\n",
-         static_cast<uint64_t>(b.phy()), reinterpret_cast<uintptr_t>(b.vir()));
+  axsys::CmmBuffer buf;
+  axsys::CmmView v = buf.Allocate(kLen, axsys::CacheMode::kCached, "cmm_002");
+  printf("  phy=0x%" PRIx64 ", v=0x%" PRIuPTR "\n",
+         static_cast<uint64_t>(buf.Phys()),
+         reinterpret_cast<uintptr_t>(v.Data()));
+}
+
+void Case003() {
+  printf("[003] Verify/Dump (non-cached virt)\n");
+  axsys::CmmBuffer buf;
+  (void)buf.Allocate(1 * 1024 * 1024, axsys::CacheMode::kNonCached, "cmm_003");
+  bool ok = buf.Verify();
+  printf("  verify=%s\n", ok ? "true" : "false");
+  buf.Dump();
 }
 
 void Case004() {
   printf("[004] Mmap/Munmap (non-cached)\n");
-  CmmBuffer b;
-  if (!b.Alloc(kLen, CacheMode::kNonCached, "cmm_004")) return;
-  if (!b.Map(0, kLen)) return;
-  printf("  map=0x%" PRIuPTR "\n", reinterpret_cast<uintptr_t>(b.map()));
+  axsys::CmmBuffer buf;
+  axsys::CmmView v =
+      buf.Allocate(kLen, axsys::CacheMode::kNonCached, "cmm_004");
+  printf("  map=0x%" PRIuPTR "\n", reinterpret_cast<uintptr_t>(v.Data()));
 }
 
 void Case005() {
-  printf("[005] MmapCache/MflushCache/Munmap (cached)\n");
-  CmmBuffer b;
-  if (!b.Alloc(kLen, CacheMode::kCached, "cmm_005")) return;
-  if (!b.Map(0, kLen)) return;
-  printf("  map=0x%" PRIuPTR "\n", reinterpret_cast<uintptr_t>(b.map()));
-  // write then flush
-  memset(b.map(), 0xA5, kLen);
-  AX_SYS_MflushCache(b.phy(), b.map(), kLen);
+  printf("[005] MmapCache/Flush/Munmap (cached)\n");
+  axsys::CmmBuffer buf;
+  axsys::CmmView v = buf.Allocate(kLen, axsys::CacheMode::kCached, "cmm_005");
+  memset(v.Data(), 0xA5, kLen);
+  v.Flush();
 }
 
 void Case006() {
-  printf("[006] MmapCache/MinvalidateCache/Munmap (cached)\n");
-  CmmBuffer b;
-  if (!b.Alloc(kLen, CacheMode::kCached, "cmm_006")) return;
-  if (!b.Map(0, kLen)) return;
-  printf("  map=0x%" PRIuPTR "\n", reinterpret_cast<uintptr_t>(b.map()));
-  // pretend external writer, then invalidate before reading
-  AX_SYS_MinvalidateCache(b.phy(), b.map(), kLen);
+  printf("[006] MmapCache/Invalidate/Munmap (cached)\n");
+  axsys::CmmBuffer buf;
+  axsys::CmmView v = buf.Allocate(kLen, axsys::CacheMode::kCached, "cmm_006");
+  v.Invalidate();
   volatile uint8_t sum = 0;
-  for (uint32_t i = 0; i < 64; ++i) sum += static_cast<uint8_t*>(b.map())[i];
+  for (uint32_t i = 0; i < 64; ++i) sum += static_cast<uint8_t*>(v.Data())[i];
   (void)sum;
-}
-
-void Case019() {
-  printf("[019] GetBlockInfoByVirt/ByPhy\n");
-  CmmBuffer b_nc;
-  CmmBuffer b_c;
-  if (!b_nc.Alloc(kLen, CacheMode::kNonCached, "cmm_019_nc")) return;
-  if (!b_c.Alloc(kLen, CacheMode::kCached, "cmm_019_c")) return;
-
-  AX_U64 phy_out = 0;
-  AX_S32 mem_type = 0;
-  if (AX_SYS_MemGetBlockInfoByVirt(b_nc.vir(), &phy_out, &mem_type) == 0) {
-    printf("  virt(nc)=0x%" PRIuPTR " -> phy=0x%" PRIx64 ", memType=%d\n",
-           reinterpret_cast<uintptr_t>(b_nc.vir()),
-           static_cast<uint64_t>(phy_out), mem_type);
-  }
-  void* vir_out = nullptr;
-  AX_U32 blk_sz = 0;
-  if (AX_SYS_MemGetBlockInfoByPhy(b_c.phy(), &mem_type, &vir_out, &blk_sz) ==
-      0) {
-    printf("  phy(c)=0x%" PRIx64 " -> virt=0x%" PRIuPTR ", type=%d, blkSz=%u\n",
-           static_cast<uint64_t>(b_c.phy()),
-           reinterpret_cast<uintptr_t>(vir_out), mem_type, blk_sz);
-  }
-}
-
-void Case003() {
-  printf("[003] GetBlockInfoByVirt/ByPhy (non-cached virt)\n");
-  CmmBuffer b;
-  if (!b.Alloc(1 * 1024 * 1024, CacheMode::kNonCached, "cmm_003")) return;
-  AX_U64 phy2 = 0;
-  AX_S32 mem_type = 0;
-  if (AX_SYS_MemGetBlockInfoByVirt(b.vir(), &phy2, &mem_type) == 0) {
-    printf("  virt=0x%" PRIuPTR " -> phy=0x%" PRIx64 ", type=%d\n",
-           reinterpret_cast<uintptr_t>(b.vir()), static_cast<uint64_t>(phy2),
-           mem_type);
-  }
-  void* vir2 = nullptr;
-  AX_U32 blk_sz = 0;
-  if (AX_SYS_MemGetBlockInfoByPhy(b.phy(), &mem_type, &vir2, &blk_sz) == 0) {
-    printf("  phy=0x%" PRIx64 " -> virt=0x%" PRIuPTR ", type=%d, blkSz=%u\n",
-           static_cast<uint64_t>(b.phy()), reinterpret_cast<uintptr_t>(vir2),
-           mem_type, blk_sz);
-  }
 }
 
 void Case007() {
   printf("[007] MflushCache scaling sizes\n");
-  const int kTests = 8;  // reduce from 32
+  const int kTests = 8;
   for (int j = 1; j <= kTests; ++j) {
     uint32_t sz = j * 1024 * 1024;
-    CmmBuffer src, dst;
-    if (!src.Alloc(sz, CacheMode::kCached, "cmm_007_src")) return;
-    if (!dst.Alloc(sz, CacheMode::kNonCached, "cmm_007_dst")) return;
-    memset(src.vir(), 0x78, sz);
+    axsys::CmmBuffer src, dst;
+    axsys::CmmView vsrc =
+        src.Allocate(sz, axsys::CacheMode::kCached, "cmm_007_src");
+    axsys::CmmView vdst =
+        dst.Allocate(sz, axsys::CacheMode::kNonCached, "cmm_007_dst");
+    memset(vsrc.Data(), 0x78, sz);
     for (int i = 0; i <= 255 && i < static_cast<int>(sz); ++i) {
-      static_cast<uint8_t*>(src.vir())[i] = 255 - i;
+      static_cast<uint8_t*>(vsrc.Data())[i] = 255 - i;
     }
-    AX_SYS_MflushCache(src.phy(), src.vir(), sz);
-    // Map dst non-cached (not needed; it's non-cached virt)
-    memcpy(dst.vir(), src.vir(), sz);
+    vsrc.Flush();
+    memcpy(vdst.Data(), vsrc.Data(), sz);
   }
 }
 
@@ -300,243 +106,266 @@ void Case008() {
   const int kTests = 8;
   for (int j = 1; j <= kTests; ++j) {
     uint32_t sz = j * 1024 * 1024;
-    CmmBuffer src, dst;
-    if (!src.Alloc(sz, CacheMode::kNonCached, "cmm_008_src")) return;
-    if (!dst.Alloc(sz, CacheMode::kCached, "cmm_008_dst")) return;
-    memset(src.vir(), 0xAB, sz);
-    if (!dst.Map(0, sz)) return;
-    memset(dst.map(), 0xCD, sz);
-    AX_SYS_MinvalidateCache(dst.phy(), dst.map(), sz);
-    memcpy(dst.map(), src.vir(), sz);
+    axsys::CmmBuffer src, dst;
+    axsys::CmmView vsrc =
+        src.Allocate(sz, axsys::CacheMode::kNonCached, "cmm_008_src");
+    axsys::CmmView vdst =
+        dst.Allocate(sz, axsys::CacheMode::kCached, "cmm_008_dst");
+    memset(vsrc.Data(), 0xAB, sz);
+    memset(vdst.Data(), 0xCD, sz);
+    vdst.Invalidate();
+    memcpy(vdst.Data(), vsrc.Data(), sz);
   }
 }
 
 void Case009() {
-  printf("[009] MflushCache with offset (pass)\n");
-  const uint32_t l_size = 4 * 1024 * 1024;
-  uint32_t offset = 2 * 1024 * 1024;
-  for (int j = 0; j < 100; ++j) {
-    CmmBuffer src, dst;
-    if (!src.Alloc(l_size, CacheMode::kCached, "cmm_009_src")) return;
-    if (!dst.Alloc(l_size, CacheMode::kNonCached, "cmm_009_dst")) return;
-    memset(src.vir(), 0x78, l_size);
-    for (int i = 0; i <= 255; ++i) {
-      static_cast<uint8_t*>(src.vir())[i] = static_cast<uint8_t>(255 - i);
-    }
-    AX_SYS_MflushCache(src.phy() + offset,
-                       static_cast<uint8_t*>(src.vir()) + offset,
-                       l_size - offset);
-    if (MemcpyFunc(src, dst, l_size) != 0) return;
-    for (uint32_t i = offset; i < l_size; ++i) {
-      if (static_cast<uint8_t*>(dst.vir())[i] !=
-          static_cast<uint8_t*>(src.vir())[i]) {
-        printf("[009] mismatch at %u\n", i);
-        return;
-      }
+  printf("[009] Flush with offset (cached src -> noncached dst)\n");
+  const uint32_t size = 4 * 1024 * 1024;
+  const uint32_t offset = 2 * 1024 * 1024;
+  axsys::CmmBuffer src, dst;
+  axsys::CmmView vsrc =
+      src.Allocate(size, axsys::CacheMode::kCached, "cmm_009_src");
+  axsys::CmmView vdst =
+      dst.Allocate(size, axsys::CacheMode::kNonCached, "cmm_009_dst");
+  memset(vsrc.Data(), 0x78, size);
+  for (uint32_t i = 0; i <= 255 && i < size; ++i) {
+    static_cast<uint8_t*>(vsrc.Data())[i] = 255 - i;
+  }
+  axsys::CmmView vflush =
+      src.MapView(offset, size - offset, axsys::CacheMode::kCached);
+  (void)vflush.Flush();
+  memcpy(vdst.Data(), vsrc.Data(), size);
+  bool ok = true;
+  for (uint32_t i = offset; i < size; ++i) {
+    if (static_cast<uint8_t*>(vdst.Data())[i] !=
+        static_cast<uint8_t*>(vsrc.Data())[i]) {
+      printf("  mismatch at %u: dst=0x%x src=0x%x\n", i,
+             static_cast<unsigned>(static_cast<uint8_t*>(vdst.Data())[i]),
+             static_cast<unsigned>(static_cast<uint8_t*>(vsrc.Data())[i]));
+      ok = false;
+      break;
     }
   }
+  printf("  result: %s\n", ok ? "pass" : "fail");
 }
 
 void Case010() {
-  printf("[010] MflushCache with offset (pass)\n");
-  const uint32_t l_size = 4 * 1024 * 1024;
-  uint32_t offset = 2 * 1024 * 1024;
-  for (int j = 0; j < 100; ++j) {
-    CmmBuffer src, dst;
-    if (!src.Alloc(l_size, CacheMode::kCached, "cmm_010_src")) return;
-    if (!dst.Alloc(l_size, CacheMode::kNonCached, "cmm_010_dst")) return;
-    memset(src.vir(), 0x78, l_size);
-    for (int i = 0; i <= 255; ++i) {
-      static_cast<uint8_t*>(src.vir())[i] = static_cast<uint8_t>(255 - i);
-    }
-    AX_SYS_MflushCache(src.phy() + offset,
-                       static_cast<uint8_t*>(src.vir()) + offset,
-                       l_size - offset);
-    if (MemcpyFunc(src, dst, l_size) != 0) return;
-    for (uint32_t i = offset; i < l_size; ++i) {
-      if (static_cast<uint8_t*>(dst.vir())[i] !=
-          static_cast<uint8_t*>(src.vir())[i]) {
-        printf("[010] mismatch at %u\n", i);
-        return;
-      }
+  printf("[010] Flush with offset (repeat of 009)\n");
+  const uint32_t size = 4 * 1024 * 1024;
+  const uint32_t offset = 2 * 1024 * 1024;
+  axsys::CmmBuffer src, dst;
+  axsys::CmmView vsrc =
+      src.Allocate(size, axsys::CacheMode::kCached, "cmm_010_src");
+  axsys::CmmView vdst =
+      dst.Allocate(size, axsys::CacheMode::kNonCached, "cmm_010_dst");
+  memset(vsrc.Data(), 0x78, size);
+  for (uint32_t i = 0; i <= 255 && i < size; ++i) {
+    static_cast<uint8_t*>(vsrc.Data())[i] = 255 - i;
+  }
+  axsys::CmmView vflush =
+      src.MapView(offset, size - offset, axsys::CacheMode::kCached);
+  (void)vflush.Flush();
+  memcpy(vdst.Data(), vsrc.Data(), size);
+  bool ok = true;
+  for (uint32_t i = offset; i < size; ++i) {
+    if (static_cast<uint8_t*>(vdst.Data())[i] !=
+        static_cast<uint8_t*>(vsrc.Data())[i]) {
+      ok = false;
+      break;
     }
   }
+  printf("  result: %s\n", ok ? "pass" : "fail");
 }
 
 void Case011() {
-  printf("[011] MflushCache with offset (pass)\n");
-  const uint32_t l_size = 4 * 1024 * 1024;
-  uint32_t offset = 1 * 1024 * 1024;
-  uint32_t region = l_size / 4;
-  for (int j = 0; j < 100; ++j) {
-    CmmBuffer src, dst;
-    if (!src.Alloc(l_size, CacheMode::kCached, "cmm_011_src")) return;
-    if (!dst.Alloc(l_size, CacheMode::kNonCached, "cmm_011_dst")) return;
-    memset(src.vir(), 0x88, l_size);
-    for (int i = 0; i <= 255; ++i) {
-      static_cast<uint8_t*>(src.vir())[i] = static_cast<uint8_t>(255 - i);
-    }
-    AX_SYS_MflushCache(src.phy() + offset,
-                       static_cast<uint8_t*>(src.vir()) + offset, region);
-    if (MemcpyFunc(src, dst, l_size) != 0) return;
-    for (uint32_t i = offset; i < offset + region; ++i) {
-      if (static_cast<uint8_t*>(dst.vir())[i] !=
-          static_cast<uint8_t*>(src.vir())[i]) {
-        printf("[011] mismatch at %u\n", i);
-        return;
-      }
+  printf("[011] Flush subrange with offset (expect pass)\n");
+  const uint32_t size = 4 * 1024 * 1024;
+  const uint32_t offset = 1 * 1024 * 1024;
+  const uint32_t len = size / 4;
+  axsys::CmmBuffer src, dst;
+  axsys::CmmView vsrc =
+      src.Allocate(size, axsys::CacheMode::kCached, "cmm_011_src");
+  axsys::CmmView vdst =
+      dst.Allocate(size, axsys::CacheMode::kNonCached, "cmm_011_dst");
+  memset(vsrc.Data(), 0x88, size);
+  for (uint32_t i = 0; i <= 255 && i < size; ++i) {
+    static_cast<uint8_t*>(vsrc.Data())[i] = 255 - i;
+  }
+  axsys::CmmView vflush = src.MapView(offset, len, axsys::CacheMode::kCached);
+  (void)vflush.Flush();
+  memcpy(vdst.Data(), vsrc.Data(), size);
+  bool ok = true;
+  for (uint32_t i = offset; i < offset + len; ++i) {
+    if (static_cast<uint8_t*>(vdst.Data())[i] !=
+        static_cast<uint8_t*>(vsrc.Data())[i]) {
+      ok = false;
+      break;
     }
   }
+  printf("  result: %s\n", ok ? "pass" : "fail");
 }
 
 void Case012() {
-  printf("[012] MflushCache with offset case (expected to fail)\n");
-  const uint32_t l_size = 4 * 1024 * 1024;
-  CmmBuffer src;
-  if (!src.Alloc(l_size, CacheMode::kCached, "cmm_012_src")) return;
-  uint32_t offset = (2 * 1024 * 1024) + 0x1EF;  // non 4K aligned
-  memset(src.vir(), 0x77, l_size);
-  AX_S32 ret = AX_SYS_MflushCache(src.phy() + offset,
-                                  static_cast<uint8_t*>(src.vir()) + offset,
-                                  l_size - offset);
-  if (ret == 0) {
-    printf(
-        "  Note: flush unexpectedly succeeded; this case may pass "
-        "intermittently.\n");
-  } else {
-    printf("  flush returned error as expected: 0x%X\n",
-           static_cast<unsigned int>(ret));
+  printf("[012] Flush subrange then compare bigger range (expect fail)\n");
+  const uint32_t size = 4 * 1024 * 1024;
+  const uint32_t offset = 1 * 1024 * 1024;
+  const uint32_t len = size / 4;  // flushed length
+  const uint32_t cmp = size / 2;  // compare longer
+  axsys::CmmBuffer src, dst;
+  axsys::CmmView vsrc =
+      src.Allocate(size, axsys::CacheMode::kCached, "cmm_012_src");
+  axsys::CmmView vdst =
+      dst.Allocate(size, axsys::CacheMode::kNonCached, "cmm_012_dst");
+  memset(vsrc.Data(), 0x88, size);
+  for (uint32_t i = 0; i <= 255 && i < size; ++i) {
+    static_cast<uint8_t*>(vsrc.Data())[i] = 255 - i;
   }
+  axsys::CmmView vflush = src.MapView(offset, len, axsys::CacheMode::kCached);
+  (void)vflush.Flush();
+  memcpy(vdst.Data(), vsrc.Data(), size);
+  bool ok = true;
+  for (uint32_t i = offset; i < offset + cmp; ++i) {
+    if (static_cast<uint8_t*>(vdst.Data())[i] !=
+        static_cast<uint8_t*>(vsrc.Data())[i]) {
+      printf("  expected mismatch at %u: dst=0x%x src=0x%x\n", i,
+             static_cast<unsigned>(static_cast<uint8_t*>(vdst.Data())[i]),
+             static_cast<unsigned>(static_cast<uint8_t*>(vsrc.Data())[i]));
+      ok = false;
+      break;
+    }
+  }
+  printf("  result: %s (expected fail)\n", ok ? "pass" : "fail");
 }
 
 void Case013() {
-  printf("[013] MmapCache/MflushCache/Munmap with offset (pass)\n");
-  const uint32_t l_size = 4 * 1024 * 1024;
-  CmmBuffer src, dst;
-  if (!src.Alloc(l_size, CacheMode::kCached, "cmm_013_src")) return;
-  if (!dst.Alloc(l_size, CacheMode::kNonCached, "cmm_013_dst")) return;
-  uint32_t offset = 0x1000;  // 4K aligned offset
-  memset(src.vir(), 0x66, l_size);
-  AX_SYS_MflushCache(src.phy() + offset,
-                     static_cast<uint8_t*>(src.vir()) + offset,
-                     l_size - offset);
-  (void)MemcpyFunc(src, dst, l_size);
+  printf("[013] MmapCache + Flush subrange + compare (expect pass)\n");
+  const uint32_t size = 4 * 1024 * 1024;
+  const uint32_t offset = 1 * 1024 * 1024;
+  axsys::CmmBuffer buf;
+  axsys::CmmView base =
+      buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_013_base");
+  axsys::CmmView cached = buf.MapView(0, size, axsys::CacheMode::kCached);
+  memset(cached.Data(), 0xFE, size);
+  axsys::CmmView sub = buf.MapView(offset, size / 2, axsys::CacheMode::kCached);
+  (void)sub.Flush();
+  bool ok = true;
+  for (uint32_t i = offset; i < offset + size / 2; ++i) {
+    if (static_cast<uint8_t*>(base.Data())[i] !=
+        static_cast<uint8_t*>(cached.Data())[i]) {
+      ok = false;
+      break;
+    }
+  }
+  printf("  result: %s\n", ok ? "pass" : "fail");
 }
 
 void Case014() {
-  printf("[014] MmapCache/MflushCache/Munmap with offset (expected fail)\n");
-  const uint32_t l_size = 4 * 1024 * 1024;
-  CmmBuffer src;
-  if (!src.Alloc(l_size, CacheMode::kCached, "cmm_014_src")) return;
-  uint32_t offset = 0x11EF;  // non 4K aligned
-  AX_S32 ret = AX_SYS_MflushCache(src.phy() + offset,
-                                  static_cast<uint8_t*>(src.vir()) + offset,
-                                  l_size - offset);
-  if (ret != 0) {
-    printf("  expected failure: 0x%X\n", static_cast<unsigned int>(ret));
-  } else {
-    printf("  warning: flush succeeded; behavior may vary.\n");
+  printf("[014] MmapCache + Flush subrange + compare bigger (expect fail)\n");
+  const uint32_t size = 4 * 1024 * 1024;
+  const uint32_t offset = 1 * 1024 * 1024;
+  axsys::CmmBuffer buf;
+  axsys::CmmView base =
+      buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_014_base");
+  axsys::CmmView cached = buf.MapView(0, size, axsys::CacheMode::kCached);
+  memset(cached.Data(), 0x66, size);
+  axsys::CmmView sub = buf.MapView(offset, size / 2, axsys::CacheMode::kCached);
+  (void)sub.Flush();
+  bool ok = true;
+  for (uint32_t i = offset; i < size; ++i) {
+    if (static_cast<uint8_t*>(base.Data())[i] !=
+        static_cast<uint8_t*>(cached.Data())[i]) {
+      printf("  expected mismatch at %u\n", i);
+      ok = false;
+      break;
+    }
   }
+  printf("  result: %s (expected fail)\n", ok ? "pass" : "fail");
 }
 
 void Case015() {
-  printf("[015] MmapCache/Flush/Munmap unmanaged mode\n");
-  AX_CMM_STATUS_T st{};
-  if (AX_SYS_MemQueryStatus(&st) != 0) return;
-  int idx = -1;
-  for (AX_U32 i = 0; i < st.Partition.PartitionCnt; ++i) {
-    if (strcmp(
-            reinterpret_cast<const char*>(st.Partition.PartitionInfo[i].Name),
-            "anonymous") == 0) {
-      idx = static_cast<int>(i);
+  printf("[015] External attach + cached/noncached views + Flush\n");
+  axsys::CmmBuffer::PartitionInfo part;
+  if (!axsys::CmmBuffer::FindAnonymous(&part)) return;
+  const uint32_t block_size = 1 * 1024 * 1024;
+  const uint64_t phys =
+      part.phys + static_cast<uint64_t>(part.size_kb) * 1024 - block_size * 2;
+  axsys::CmmBuffer buf;
+  if (!buf.AttachExternal(phys, block_size)) return;
+  axsys::CmmView nc = buf.MapView(0, block_size, axsys::CacheMode::kNonCached);
+  axsys::CmmView c = buf.MapView(0, block_size, axsys::CacheMode::kCached);
+  if (!nc.Ok() || !c.Ok()) return;
+  memset(nc.Data(), 0xDF, block_size);
+  memset(c.Data(), 0xDE, block_size);
+  (void)c.Flush();
+  bool ok = true;
+  for (uint32_t i = 0; i < block_size; ++i) {
+    if (static_cast<uint8_t*>(nc.Data())[i] !=
+        static_cast<uint8_t*>(c.Data())[i]) {
+      ok = false;
       break;
     }
   }
-  if (idx < 0) return;
-  AX_U64 base = st.Partition.PartitionInfo[idx].PhysAddr;
-  AX_U64 size_kb = st.Partition.PartitionInfo[idx].SizeKB;
-  AX_U32 blk = 1 * 1024 * 1024;
-  AX_U64 phys = base + static_cast<AX_U64>(size_kb) * 1024 - blk * 2;
-  const int TEST_TIME = 100;
-  for (int j = 0; j < TEST_TIME; ++j) {
-    void* v_nc = AX_SYS_Mmap(phys, blk);
-    if (!v_nc) return;
-    memset(v_nc, 0xDF, blk);
-    void* v_c = AX_SYS_MmapCache(phys, blk);
-    if (!v_c) return;
-    memset(v_c, 0xDE, blk);
-    AX_SYS_MflushCache(phys, v_c, blk);
-    for (AX_U32 i = 0; i < blk; ++i) {
-      if (static_cast<uint8_t*>(v_nc)[i] != static_cast<uint8_t*>(v_c)[i]) {
-        printf("[015] mismatch at %u\n", i);
-        break;
-      }
-    }
-    AX_SYS_Munmap(v_nc, blk);
-    AX_SYS_Munmap(v_c, blk);
-  }
+  printf("  result: %s\n", ok ? "pass" : "fail");
 }
 
 void Case016() {
-  printf("[016] MmapCache/Invalidate/Munmap unmanaged mode\n");
-  AX_CMM_STATUS_T st{};
-  if (AX_SYS_MemQueryStatus(&st) != 0) return;
-  int idx = -1;
-  for (AX_U32 i = 0; i < st.Partition.PartitionCnt; ++i) {
-    if (strcmp(
-            reinterpret_cast<const char*>(st.Partition.PartitionInfo[i].Name),
-            "anonymous") == 0) {
-      idx = static_cast<int>(i);
+  printf("[016] External attach + cached/noncached views + Invalidate\n");
+  axsys::CmmBuffer::PartitionInfo part;
+  if (!axsys::CmmBuffer::FindAnonymous(&part)) return;
+  const uint32_t block_size = 1 * 1024 * 1024;
+  const uint64_t phys =
+      part.phys + static_cast<uint64_t>(part.size_kb) * 1024 - block_size * 2;
+  axsys::CmmBuffer buf;
+  if (!buf.AttachExternal(phys, block_size)) return;
+  axsys::CmmView nc = buf.MapView(0, block_size, axsys::CacheMode::kNonCached);
+  axsys::CmmView c = buf.MapView(0, block_size, axsys::CacheMode::kCached);
+  if (!nc.Ok() || !c.Ok()) return;
+  memset(nc.Data(), 0xBC, block_size);
+  memset(c.Data(), 0xFA, block_size);
+  (void)c.Invalidate();
+  memset(nc.Data(), 0xBB, block_size);
+  bool ok = true;
+  for (uint32_t i = 0; i < block_size; ++i) {
+    if (static_cast<uint8_t*>(nc.Data())[i] !=
+        static_cast<uint8_t*>(c.Data())[i]) {
+      ok = false;
       break;
     }
   }
-  if (idx < 0) return;
-  AX_U64 base = st.Partition.PartitionInfo[idx].PhysAddr;
-  AX_U64 size_kb = st.Partition.PartitionInfo[idx].SizeKB;
-  AX_U32 blk = 1 * 1024 * 1024;
-  AX_U64 phys = base + static_cast<AX_U64>(size_kb) * 1024 - blk * 2;
-  void* v_nc = AX_SYS_Mmap(phys, blk);
-  if (!v_nc) return;
-  printf("  noncached v=%p\n", v_nc);
-  void* v_c = AX_SYS_MmapCache(phys, blk);
-  if (!v_c) return;
-  printf("  cached v=%p\n", v_c);
-  AX_SYS_MinvalidateCache(phys, v_c, blk);
-  AX_SYS_Munmap(v_c, blk);
-  AX_SYS_Munmap(v_nc, blk);
+  printf("  result: %s\n", ok ? "pass" : "fail");
 }
+
 void Case017() {
-  printf("[017] GetBlockInfo (cached virt)\n");
-  CmmBuffer b;
-  if (!b.Alloc(1 * 1024 * 1024, CacheMode::kCached, "cmm_017")) return;
-  if (!b.Map(0, 1 * 1024 * 1024)) return;
-  AX_U64 phy2 = 0;
-  AX_S32 mem_type = 0;
-  if (AX_SYS_MemGetBlockInfoByVirt(b.map(), &phy2, &mem_type) == 0) {
-    printf("  virt(c)=0x%" PRIuPTR " -> phy=0x%" PRIx64 ", type=%d\n",
-           reinterpret_cast<uintptr_t>(b.map()), static_cast<uint64_t>(phy2),
-           mem_type);
-  }
+  printf("[017] Verify/Dump (cached virt)\n");
+  axsys::CmmBuffer buf;
+  (void)buf.Allocate(1 * 1024 * 1024, axsys::CacheMode::kCached, "cmm_017");
+  bool ok = buf.Verify();
+  printf("  verify=%s\n", ok ? "true" : "false");
+  buf.Dump();
 }
 
 void Case018() {
-  printf("[018] GetBlockInfo (mapped non-cached addr)\n");
-  CmmBuffer b;
-  if (!b.Alloc(1 * 1024 * 1024, CacheMode::kNonCached, "cmm_018")) return;
-  if (!b.Map(0, 1 * 1024 * 1024)) return;
-  AX_U64 phy2 = 0;
-  AX_S32 mem_type = 0;
-  if (AX_SYS_MemGetBlockInfoByVirt(b.map(), &phy2, &mem_type) == 0) {
-    printf("  virt(nc)=0x%" PRIuPTR " -> phy=0x%" PRIx64 ", type=%d\n",
-           reinterpret_cast<uintptr_t>(b.map()), static_cast<uint64_t>(phy2),
-           mem_type);
-  }
+  printf("[018] Verify/Dump (mapped non-cached addr)\n");
+  axsys::CmmBuffer buf;
+  (void)buf.Allocate(1 * 1024 * 1024, axsys::CacheMode::kNonCached, "cmm_018");
+  bool ok = buf.Verify();
+  printf("  verify=%s\n", ok ? "true" : "false");
+  buf.Dump();
+}
+
+void Case019() {
+  printf("[019] Verify/Dump via lib\n");
+  axsys::CmmBuffer buf;
+  (void)buf.Allocate(1 * 1024 * 1024, axsys::CacheMode::kCached, "cmm_019");
+  bool ok = buf.Verify();
+  printf("  verify=%s\n", ok ? "true" : "false");
+  buf.Dump();
 }
 
 void Case020() {
-  printf("[020] Mmap/MmapCache on POOL block\n");
-  // Minimal variant from sample: configure one common pool, get a block
-  AX_POOL_FLOORPLAN_T plan{};
+  printf("[020] POOL block + Mmap/MmapCache (short)\n");
+  AX_POOL_FLOORPLAN_T plan;
+  memset(&plan, 0, sizeof(plan));
   plan.CommPool[0].MetaSize = 0x1000;
   plan.CommPool[0].BlkSize = 3 * 1024 * 1024;
   plan.CommPool[0].BlkCnt = 1;
@@ -564,53 +393,50 @@ void Case020() {
 
 void Case021() {
   printf("[021] MmapFast address consistency\n");
-  CmmBuffer b;
-  if (!b.Alloc(kLen, CacheMode::kNonCached, "cmm_021")) return;
-  void* v1 = AX_SYS_MmapFast(b.phy(), kLen);
-  void* v2 = AX_SYS_MmapFast(b.phy(), kLen);
-  printf("  map1=%p map2=%p%s\n", v1, v2, (v1 == v2 ? " (same)" : " (diff)"));
-  if (v1) AX_SYS_Munmap(v1, kLen);
-  if (v2 && v2 != v1) AX_SYS_Munmap(v2, kLen);
+  axsys::CmmBuffer buf;
+  (void)buf.Allocate(kLen, axsys::CacheMode::kNonCached, "cmm_021");
+  axsys::CmmView v1 = buf.MapViewFast(0, kLen, axsys::CacheMode::kNonCached);
+  axsys::CmmView v2 = buf.MapViewFast(0, kLen, axsys::CacheMode::kNonCached);
+  printf("  map1=%p map2=%p%s\n", v1.Data(), v2.Data(),
+         (v1.Data() == v2.Data() ? " (same)" : " (diff)"));
 }
 
 void Case022() {
   printf("[022] MmapCacheFast address consistency\n");
-  CmmBuffer b;
-  if (!b.Alloc(kLen, CacheMode::kNonCached, "cmm_022")) return;
-  void* v1 = AX_SYS_MmapCacheFast(b.phy(), kLen);
-  void* v2 = AX_SYS_MmapCacheFast(b.phy(), kLen);
-  printf("  map1=%p map2=%p%s\n", v1, v2, (v1 == v2 ? " (same)" : " (diff)"));
-  if (v1) AX_SYS_Munmap(v1, kLen);
-  if (v2 && v2 != v1) AX_SYS_Munmap(v2, kLen);
+  axsys::CmmBuffer buf;
+  (void)buf.Allocate(kLen, axsys::CacheMode::kNonCached, "cmm_022");
+  axsys::CmmView v1 = buf.MapViewFast(0, kLen, axsys::CacheMode::kCached);
+  axsys::CmmView v2 = buf.MapViewFast(0, kLen, axsys::CacheMode::kCached);
+  printf("  map1=%p map2=%p%s\n", v1.Data(), v2.Data(),
+         (v1.Data() == v2.Data() ? " (same)" : " (diff)"));
 }
 
 void Case023() {
   printf("[023] MmapCacheFast + MflushCache + Munmap\n");
-  CmmBuffer b;
-  if (!b.Alloc(kLen, CacheMode::kNonCached, "cmm_023")) return;
-  void* v = AX_SYS_MmapCacheFast(b.phy(), kLen);
-  if (!v) return;
-  memset(v, 0xFA, kLen);
-  AX_SYS_MflushCache(b.phy(), v, kLen);
-  AX_SYS_Munmap(v, kLen);
+  axsys::CmmBuffer buf;
+  (void)buf.Allocate(kLen, axsys::CacheMode::kNonCached, "cmm_023");
+  axsys::CmmView v = buf.MapViewFast(0, kLen, axsys::CacheMode::kCached);
+  if (!v.Ok()) return;
+  memset(v.Data(), 0xFA, kLen);
+  v.Flush();
+  // no explicit Free
 }
 
 void Case024() {
   printf("[024] MmapCacheFast + MinvalidateCache + Munmap\n");
-  CmmBuffer b;
-  if (!b.Alloc(kLen, CacheMode::kNonCached, "cmm_024")) return;
-  void* v = AX_SYS_MmapCacheFast(b.phy(), kLen);
-  if (!v) return;
-  memset(b.vir(), 0xBC, kLen);
-  memset(v, 0xFA, kLen);
-  AX_SYS_MinvalidateCache(b.phy(), v, kLen);
-  AX_SYS_Munmap(v, kLen);
+  axsys::CmmBuffer buf;
+  (void)buf.Allocate(kLen, axsys::CacheMode::kNonCached, "cmm_024");
+  axsys::CmmView v = buf.MapViewFast(0, kLen, axsys::CacheMode::kCached);
+  if (!v.Ok()) return;
+  v.Invalidate();
+  buf.Free();
 }
+
 }  // namespace
 
 int main() {
   SystemGuard sys;
-  if (!sys.ok()) return -1;
+  if (!sys.Ok()) return -1;
   printf("sample_cmm (C++) begin\n\n");
 
   Case001();

@@ -26,7 +26,13 @@ struct Allocation {
   mutable std::mutex mtx;
   int open_maps;
   std::vector<ViewEntry> views;
-  Allocation() : phy(0), size(0), mode(CacheMode::kNonCached), open_maps(0) {}
+  bool owned;
+  Allocation()
+      : phy(0),
+        size(0),
+        mode(CacheMode::kNonCached),
+        open_maps(0),
+        owned(false) {}
 };
 
 static void* DoMmap(AX_U64 phys, uint32_t size, CacheMode mode) {
@@ -34,6 +40,13 @@ static void* DoMmap(AX_U64 phys, uint32_t size, CacheMode mode) {
     return AX_SYS_MmapCache(phys, size);
   }
   return AX_SYS_Mmap(phys, size);
+}
+
+static void* DoMmapFast(AX_U64 phys, uint32_t size, CacheMode mode) {
+  if (mode == CacheMode::kCached) {
+    return AX_SYS_MmapCacheFast(phys, size);
+  }
+  return AX_SYS_MmapFast(phys, size);
 }
 }  // namespace
 
@@ -81,6 +94,20 @@ uint64_t CmmView::Phys() const {
 
 bool CmmView::Ok() const {
   return impl_ && impl_->data != nullptr && impl_->size > 0;
+}
+
+bool CmmView::Flush() {
+  if (!impl_ || !impl_->alloc || !impl_->data || impl_->size == 0) return false;
+  AX_S32 ret = AX_SYS_MflushCache(impl_->alloc->phy + impl_->offset,
+                                  impl_->data, impl_->size);
+  return ret == 0;
+}
+
+bool CmmView::Invalidate() {
+  if (!impl_ || !impl_->alloc || !impl_->data || impl_->size == 0) return false;
+  AX_S32 ret = AX_SYS_MinvalidateCache(impl_->alloc->phy + impl_->offset,
+                                       impl_->data, impl_->size);
+  return ret == 0;
 }
 
 void CmmView::Reset() {
@@ -153,6 +180,7 @@ CmmView CmmBuffer::Allocate(uint32_t size, CacheMode mode, const char* token) {
   impl_->alloc->phy = phy;
   impl_->alloc->size = size;
   impl_->alloc->mode = mode;
+  impl_->alloc->owned = true;
 
   // create base view by mapping 0..size
   return MapView(0, size, mode);
@@ -187,6 +215,23 @@ CmmView CmmBuffer::MapView(uint32_t offset, uint32_t size,
   return CmmView(vi);
 }
 
+bool CmmBuffer::AttachExternal(uint64_t phys, uint32_t size) {
+  if (!impl_) return false;
+  if (!impl_->alloc) {
+    impl_->alloc.reset(new Allocation());
+  }
+  Allocation& a = *impl_->alloc;
+  std::lock_guard<std::mutex> lk(a.mtx);
+  if (a.open_maps != 0) return false;
+  a.phy = static_cast<AX_U64>(phys);
+  a.size = size;
+  a.mode = CacheMode::kNonCached;
+  a.views.clear();
+  a.open_maps = 0;
+  a.owned = false;
+  return true;
+}
+
 bool CmmBuffer::Free() {
   if (!impl_ || !impl_->alloc) return false;
   Allocation& a = *impl_->alloc;
@@ -194,13 +239,15 @@ bool CmmBuffer::Free() {
   if (a.open_maps > 0) {
     return false;  // views remain
   }
-  // create an alias to free; prefer non-cached map
-  void* alias = AX_SYS_Mmap(a.phy, a.size);
-  if (!alias) alias = AX_SYS_MmapCache(a.phy, a.size);
-  if (!alias) return false;
-  AX_S32 ret = AX_SYS_MemFree(a.phy, alias);
-  AX_SYS_Munmap(alias, a.size);
-  if (ret != 0) return false;
+  if (a.owned) {
+    // create an alias to free; prefer non-cached map
+    void* alias = AX_SYS_Mmap(a.phy, a.size);
+    if (!alias) alias = AX_SYS_MmapCache(a.phy, a.size);
+    if (!alias) return false;
+    AX_S32 ret = AX_SYS_MemFree(a.phy, alias);
+    AX_SYS_Munmap(alias, a.size);
+    if (ret != 0) return false;
+  }
   impl_->alloc.reset();
   return true;
 }
@@ -221,7 +268,7 @@ void CmmBuffer::Dump() const {
     return;
   }
   const Allocation& a = *impl_->alloc;
-  printf("[CmmBuffer] phy=0x%" PRIx64 ", size=%u, maps=%d\n",
+  printf("[CmmBuffer] phy=0x%" PRIx64 ", size=0x%x, maps=%d\n",
          static_cast<uint64_t>(a.phy), a.size, a.open_maps);
   std::lock_guard<std::mutex> lk(a.mtx);
   for (size_t i = 0; i < a.views.size(); ++i) {
@@ -235,15 +282,18 @@ void CmmBuffer::Dump() const {
 bool CmmBuffer::Verify() const {
   if (!impl_ || !impl_->alloc) return false;
   const Allocation& a = *impl_->alloc;
-  // Check phys
   AX_S32 mem_type = 0;
   void* vir_out = nullptr;
   AX_U32 blk_size = 0;
-  if (AX_SYS_MemGetBlockInfoByPhy(a.phy, &mem_type, &vir_out, &blk_size) != 0) {
-    return false;
-  }
-  if (blk_size < a.size) {
-    return false;
+  if (a.owned) {
+    // Check phys for owned buffers
+    if (AX_SYS_MemGetBlockInfoByPhy(a.phy, &mem_type, &vir_out, &blk_size) !=
+        0) {
+      return false;
+    }
+    if (blk_size < a.size) {
+      return false;
+    }
   }
   // Partition range check
   AX_CMM_PARTITION_INFO_T part;
@@ -273,6 +323,63 @@ bool CmmBuffer::Verify() const {
     }
   }
   return true;
+}
+
+CmmView CmmBuffer::MapViewFast(uint32_t offset, uint32_t size,
+                               CacheMode mode) const {
+  if (!impl_ || !impl_->alloc) return CmmView();
+  Allocation& a = *impl_->alloc;
+  if (offset + size > a.size) return CmmView();
+
+  void* v = DoMmapFast(a.phy + offset, size, mode);
+  if (!v) return CmmView();
+
+  {
+    std::lock_guard<std::mutex> lk(a.mtx);
+    a.open_maps += 1;
+    ViewEntry e;
+    e.addr = v;
+    e.size = size;
+    e.offset = offset;
+    e.mode = mode;
+    a.views.push_back(e);
+  }
+
+  CmmView::Impl* vi = new CmmView::Impl();
+  vi->alloc = impl_->alloc;
+  vi->data = v;
+  vi->size = size;
+  vi->offset = offset;
+  vi->mode = mode;
+  return CmmView(vi);
+}
+
+bool CmmBuffer::QueryPartitions(std::vector<PartitionInfo>* out) {
+  if (!out) return false;
+  out->clear();
+  AX_CMM_PARTITION_INFO_T part;
+  if (AX_SYS_MemGetPartitionInfo(&part) != 0) return false;
+  for (AX_U32 i = 0; i < part.PartitionCnt; ++i) {
+    PartitionInfo pi;
+    pi.name = reinterpret_cast<char*>(part.PartitionInfo[i].Name);
+    pi.phys = part.PartitionInfo[i].PhysAddr;
+    pi.size_kb = part.PartitionInfo[i].SizeKB;
+    out->push_back(pi);
+  }
+  return true;
+}
+
+bool CmmBuffer::FindAnonymous(PartitionInfo* out) {
+  if (!out) return false;
+  std::vector<PartitionInfo> v;
+  if (!QueryPartitions(&v)) return false;
+  for (size_t i = 0; i < v.size(); ++i) {
+    if (v[i].name == "anonymous") {
+      *out = v[i];
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace axsys
