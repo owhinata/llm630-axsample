@@ -571,7 +571,7 @@ void Case006() {
  */
 void Case007() {
   printf("[007] MflushCache scaling sizes\n");
-  const uint32_t kTests = 1;  // TODO(wip): 32
+  const uint32_t kTests = 32;
   uint32_t pass = 0, fail = 0;
   for (uint32_t j = 1; j <= kTests; ++j) {
     const uint32_t sz = j * 1024 * 1024;
@@ -635,7 +635,7 @@ void Case007() {
  */
 void Case008() {
   printf("[008] MinvalidateCache scaling sizes\n");
-  const uint32_t kTests = 1;  // TODO(wip): 32
+  const uint32_t kTests = 32;
   uint32_t pass = 0, fail = 0;
   for (uint32_t j = 1; j <= kTests; ++j) {
     const uint32_t sz = j * 1024 * 1024;
@@ -716,7 +716,7 @@ void Case008() {
  */
 void Case009() {
   printf("[009] Flush with offset (cached src -> noncached dst)\n");
-  const uint32_t kTests = 1;  // TODO(wip): 100
+  const uint32_t kTests = 100;
   const uint32_t size = 4 * 1024 * 1024;
   const uint32_t offset = 2 * 1024 * 1024;
   uint32_t pass = 0, fail = 0;
@@ -785,7 +785,7 @@ void Case009() {
  */
 void Case010() {
   printf("[010] Flush with offset (repeat of 009)\n");
-  const uint32_t kTests = 1;  // TODO(wip): 100
+  const uint32_t kTests = 100;
   const uint32_t size = 4 * 1024 * 1024;
   const uint32_t offset = 2 * 1024 * 1024;
   uint32_t pass = 0, fail = 0;
@@ -854,7 +854,7 @@ void Case010() {
  */
 void Case011() {
   printf("[011] Flush subrange with offset (expect pass)\n");
-  const uint32_t kTests = 1;  // TODO(wip): 100
+  const uint32_t kTests = 100;
   const uint32_t size = 4 * 1024 * 1024;
   const uint32_t offset = 1 * 1024 * 1024;
   const uint32_t len = size / 4;
@@ -925,7 +925,7 @@ void Case011() {
  */
 void Case012() {
   printf("[012] Flush subrange then compare bigger range (expect fail)\n");
-  const uint32_t kTests = 1;  // TODO(wip): 100
+  const uint32_t kTests = 100;
   const uint32_t size = 4 * 1024 * 1024;
   const uint32_t offset = 1 * 1024 * 1024;
   const uint32_t len = size / 4;  // flushed length
@@ -996,7 +996,7 @@ void Case012() {
  */
 void Case013() {
   printf("[013] MmapCache + Flush subrange + compare (expect pass)\n");
-  const uint32_t kTests = 1;  // TODO(wip): 100
+  const uint32_t kTests = 100;
   const uint32_t size = 4 * 1024 * 1024;
   const uint32_t offset = 1 * 1024 * 1024;
   const uint32_t len = size / 2;
@@ -1051,7 +1051,7 @@ void Case013() {
  */
 void Case014() {
   printf("[014] MmapCache + Flush subrange + compare bigger (expect fail)\n");
-  const uint32_t kTests = 1;  // TODO(wip): 100
+  const uint32_t kTests = 100;
   const uint32_t size = 4 * 1024 * 1024;
   const uint32_t offset = 1 * 1024 * 1024;
   const uint32_t len = size / 8;
@@ -1116,7 +1116,7 @@ void Case015() {
   const uint32_t block_size = 1 * 1024 * 1024;
   const uint64_t phys =
       part.phys + static_cast<uint64_t>(part.size_kb) * 1024 - block_size * 2;
-  const uint32_t kTests = 1;  // TODO(wip): 100
+  const uint32_t kTests = 100;
   uint32_t pass = 0, fail = 0;
 
   for (uint32_t t = 0; t < kTests; ++t) {
