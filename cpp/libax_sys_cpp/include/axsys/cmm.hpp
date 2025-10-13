@@ -22,33 +22,33 @@ class CmmView {
   ~CmmView();
 
   void* Data() const;
-  uint32_t Size() const;
+  size_t Size() const;
   CacheMode Mode() const;
 
   explicit operator bool() const;
   void Reset();
 
   bool Flush();
-  bool Flush(uint32_t offset);
-  bool Flush(uint32_t offset, uint32_t size);
+  bool Flush(size_t offset);
+  bool Flush(size_t offset, size_t size);
 
   bool Invalidate();
-  bool Invalidate(uint32_t offset);
-  bool Invalidate(uint32_t offset, uint32_t size);
+  bool Invalidate(size_t offset);
+  bool Invalidate(size_t offset, size_t size);
 
   // Create an additional view within this view's range.
   // The offset/size are relative to this view, not the allocation base.
-  CmmView MapView(uint32_t offset, uint32_t size, CacheMode mode) const;
+  CmmView MapView(size_t offset, size_t size, CacheMode mode) const;
 
   // Fast mapping variant within this view's range.
-  CmmView MapViewFast(uint32_t offset, uint32_t size, CacheMode mode) const;
+  CmmView MapViewFast(size_t offset, size_t size, CacheMode mode) const;
 
   // Obtain a buffer that shares this view's allocation.
   CmmBuffer MakeBuffer() const;
 
   // Diagnostics
   uint64_t Phys() const;
-  uint32_t Offset() const;
+  size_t Offset() const;
 
   void Dump(uintptr_t offset = 0) const;
 
@@ -69,24 +69,24 @@ class CmmBuffer {
   ~CmmBuffer();
 
   // Allocate ownership and return a base view (offset 0..size)
-  CmmView Allocate(uint32_t size, CacheMode mode, const char* token);
+  CmmView Allocate(size_t size, CacheMode mode, const char* token);
 
   // Attach to an external (non-owned) physical range; enables MapView*
   // Free() will only check no open views and reset, without MemFree.
-  bool AttachExternal(uint64_t phys, uint32_t size);
+  bool AttachExternal(uint64_t phys, size_t size);
 
   // Create an additional view
-  CmmView MapView(uint32_t offset, uint32_t size, CacheMode mode) const;
+  CmmView MapView(size_t offset, size_t size, CacheMode mode) const;
 
   // Create an additional view using AX_SYS_MmapFast/AX_SYS_MmapCacheFast
-  CmmView MapViewFast(uint32_t offset, uint32_t size, CacheMode mode) const;
+  CmmView MapViewFast(size_t offset, size_t size, CacheMode mode) const;
 
   // Free the allocation (requires no remaining views)
   bool Free();
 
   // Diagnostics
   uint64_t Phys() const;
-  uint32_t Size() const;
+  size_t Size() const;
   void Dump(uintptr_t offset = 0) const;
   bool Verify() const;
 

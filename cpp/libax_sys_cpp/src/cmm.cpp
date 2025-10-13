@@ -14,14 +14,14 @@ namespace axsys {
 namespace {
 struct ViewEntry {
   void* addr;
-  uint32_t size;
-  uint32_t offset;
+  size_t size;
+  size_t offset;
   CacheMode mode;
 };
 
 struct Allocation {
   AX_U64 phy;
-  uint32_t size;
+  size_t size;
   CacheMode mode;
   mutable std::mutex mtx;
   int open_maps;
@@ -37,26 +37,30 @@ struct Allocation {
         base_vir(nullptr) {}
 };
 
-static void* DoMmap(AX_U64 phys, uint32_t size, CacheMode mode) {
+static void* DoMmap(AX_U64 phys, size_t size, CacheMode mode) {
+  if (size > 0xFFFFFFFFu) return nullptr;
+  AX_U32 sz = static_cast<AX_U32>(size);
   if (mode == CacheMode::kCached) {
-    return AX_SYS_MmapCache(phys, size);
+    return AX_SYS_MmapCache(phys, sz);
   }
-  return AX_SYS_Mmap(phys, size);
+  return AX_SYS_Mmap(phys, sz);
 }
 
-static void* DoMmapFast(AX_U64 phys, uint32_t size, CacheMode mode) {
+static void* DoMmapFast(AX_U64 phys, size_t size, CacheMode mode) {
+  if (size > 0xFFFFFFFFu) return nullptr;
+  AX_U32 sz = static_cast<AX_U32>(size);
   if (mode == CacheMode::kCached) {
-    return AX_SYS_MmapCacheFast(phys, size);
+    return AX_SYS_MmapCacheFast(phys, sz);
   }
-  return AX_SYS_MmapFast(phys, size);
+  return AX_SYS_MmapFast(phys, sz);
 }
 }  // namespace
 
 struct CmmView::Impl {
   std::shared_ptr<Allocation> alloc;
-  uint32_t offset;
+  size_t offset;
   void* data;
-  uint32_t size;
+  size_t size;
   CacheMode mode;
   Impl() : offset(0), data(nullptr), size(0), mode(CacheMode::kNonCached) {}
 };
@@ -82,7 +86,7 @@ CmmView::~CmmView() { Reset(); }
 
 void* CmmView::Data() const { return impl_ ? impl_->data : nullptr; }
 
-uint32_t CmmView::Size() const { return impl_ ? impl_->size : 0; }
+size_t CmmView::Size() const { return impl_ ? impl_->size : 0; }
 
 CacheMode CmmView::Mode() const {
   return impl_ ? impl_->mode : CacheMode::kNonCached;
@@ -92,7 +96,7 @@ uint64_t CmmView::Phys() const {
   return impl_ && impl_->alloc ? (impl_->alloc->phy + impl_->offset) : 0;
 }
 
-uint32_t CmmView::Offset() const { return impl_ ? impl_->offset : 0; }
+size_t CmmView::Offset() const { return impl_ ? impl_->offset : 0; }
 
 CmmView::operator bool() const {
   return impl_ && impl_->data != nullptr && impl_->size > 0;
@@ -101,7 +105,9 @@ CmmView::operator bool() const {
 void CmmView::Reset() {
   if (!impl_) return;
   if (impl_->data) {
-    AX_SYS_Munmap(impl_->data, impl_->size);
+    if (impl_->size <= 0xFFFFFFFFu) {
+      AX_SYS_Munmap(impl_->data, static_cast<AX_U32>(impl_->size));
+    }
     if (impl_->alloc) {
       std::lock_guard<std::mutex> lk(impl_->alloc->mtx);
       // remove from registry
@@ -126,21 +132,29 @@ bool CmmView::Flush() {
   return Flush(0, impl_->size);
 }
 
-bool CmmView::Flush(uint32_t offset) {
+bool CmmView::Flush(size_t offset) {
   if (!impl_ || !impl_->data) return false;
   if (offset >= impl_->size) return false;
   return Flush(offset, impl_->size - offset);
 }
 
-bool CmmView::Flush(uint32_t offset, uint32_t size) {
+bool CmmView::Flush(size_t offset, size_t size) {
   if (!impl_ || !impl_->alloc || !impl_->data) return false;
   if (offset >= impl_->size) return false;
   if (size == 0 || offset + size > impl_->size) return false;
   AX_U64 phys = impl_->alloc->phy + impl_->offset + offset;
-  void* virt = reinterpret_cast<void*>(
-      reinterpret_cast<uintptr_t>(impl_->data) + offset);
-  AX_S32 ret = AX_SYS_MflushCache(phys, virt, size);
-  return ret == 0;
+  uintptr_t v = reinterpret_cast<uintptr_t>(impl_->data) + offset;
+  size_t remain = size;
+  while (remain > 0) {
+    AX_U32 chunk =
+        remain > 0xFFFFFFFFu ? 0xFFFFFFFFu : static_cast<AX_U32>(remain);
+    AX_S32 ret = AX_SYS_MflushCache(phys, reinterpret_cast<void*>(v), chunk);
+    if (ret != 0) return false;
+    phys += chunk;
+    v += chunk;
+    remain -= chunk;
+  }
+  return true;
 }
 
 bool CmmView::Invalidate() {
@@ -148,28 +162,37 @@ bool CmmView::Invalidate() {
   return Invalidate(0, impl_->size);
 }
 
-bool CmmView::Invalidate(uint32_t offset) {
+bool CmmView::Invalidate(size_t offset) {
   if (!impl_ || !impl_->data) return false;
   if (offset >= impl_->size) return false;
   return Invalidate(offset, impl_->size - offset);
 }
 
-bool CmmView::Invalidate(uint32_t offset, uint32_t size) {
+bool CmmView::Invalidate(size_t offset, size_t size) {
   if (!impl_ || !impl_->alloc || !impl_->data) return false;
   if (offset >= impl_->size) return false;
   if (size == 0 || offset + size > impl_->size) return false;
   AX_U64 phys = impl_->alloc->phy + impl_->offset + offset;
-  void* virt = reinterpret_cast<void*>(
-      reinterpret_cast<uintptr_t>(impl_->data) + offset);
-  AX_S32 ret = AX_SYS_MinvalidateCache(phys, virt, size);
-  return ret == 0;
+  uintptr_t v = reinterpret_cast<uintptr_t>(impl_->data) + offset;
+  size_t remain = size;
+  while (remain > 0) {
+    AX_U32 chunk =
+        remain > 0xFFFFFFFFu ? 0xFFFFFFFFu : static_cast<AX_U32>(remain);
+    AX_S32 ret =
+        AX_SYS_MinvalidateCache(phys, reinterpret_cast<void*>(v), chunk);
+    if (ret != 0) return false;
+    phys += chunk;
+    v += chunk;
+    remain -= chunk;
+  }
+  return true;
 }
 
-CmmView CmmView::MapView(uint32_t offset, uint32_t size, CacheMode mode) const {
+CmmView CmmView::MapView(size_t offset, size_t size, CacheMode mode) const {
   if (!impl_ || !impl_->alloc) return CmmView();
   Allocation& a = *impl_->alloc;
   if (offset + size > impl_->size) return CmmView();
-  uint32_t abs_off = impl_->offset + offset;
+  size_t abs_off = impl_->offset + offset;
 
   void* v = DoMmap(a.phy + abs_off, size, mode);
   if (!v) return CmmView();
@@ -194,12 +217,11 @@ CmmView CmmView::MapView(uint32_t offset, uint32_t size, CacheMode mode) const {
   return CmmView(vi);
 }
 
-CmmView CmmView::MapViewFast(uint32_t offset, uint32_t size,
-                             CacheMode mode) const {
+CmmView CmmView::MapViewFast(size_t offset, size_t size, CacheMode mode) const {
   if (!impl_ || !impl_->alloc) return CmmView();
   Allocation& a = *impl_->alloc;
   if (offset + size > impl_->size) return CmmView();
-  uint32_t abs_off = impl_->offset + offset;
+  size_t abs_off = impl_->offset + offset;
 
   void* v = DoMmapFast(a.phy + abs_off, size, mode);
   if (!v) return CmmView();
@@ -229,11 +251,11 @@ void CmmView::Dump(uintptr_t offset) const {
     printf("[CmmView] empty\n");
     return;
   }
-  printf("[CmmView] base_v=%p size=0x%x mode=%s\n", impl_->data, impl_->size,
+  printf("[CmmView] base_v=%p size=0x%zx mode=%s\n", impl_->data, impl_->size,
          (impl_->mode == CacheMode::kCached ? "cached" : "nonc"));
   // Range check relative to this view
-  if (offset >= static_cast<uintptr_t>(impl_->size)) {
-    printf("  [Dump] offset 0x%" PRIxPTR " out of range for view size 0x%x\n",
+  if (offset >= impl_->size) {
+    printf("  [Dump] offset 0x%" PRIxPTR " out of range for view size 0x%zx\n",
            offset, impl_->size);
     return;
   }
@@ -275,19 +297,24 @@ CmmBuffer::~CmmBuffer() {
   }
 }
 
-CmmView CmmBuffer::Allocate(uint32_t size, CacheMode mode, const char* token) {
+CmmView CmmBuffer::Allocate(size_t size, CacheMode mode, const char* token) {
   if (!impl_) return CmmView();
   if (impl_->alloc && impl_->alloc->phy != 0) {
+    return CmmView();
+  }
+  if (size > 0xFFFFFFFFu) {
+    printf("[CmmBuffer::Allocate] size too large (0x%zx)\n", size);
     return CmmView();
   }
   AX_U64 phy = 0;
   void* vir = nullptr;
   AX_S32 ret = 0;
+  AX_U32 sz = static_cast<AX_U32>(size);
   if (mode == CacheMode::kCached) {
-    ret = AX_SYS_MemAllocCached(&phy, &vir, size, 0x1000,
+    ret = AX_SYS_MemAllocCached(&phy, &vir, sz, 0x1000,
                                 reinterpret_cast<const AX_S8*>(token));
   } else {
-    ret = AX_SYS_MemAlloc(&phy, &vir, size, 0x1000,
+    ret = AX_SYS_MemAlloc(&phy, &vir, sz, 0x1000,
                           reinterpret_cast<const AX_S8*>(token));
   }
   if (ret != 0) {
@@ -317,8 +344,7 @@ CmmView CmmBuffer::Allocate(uint32_t size, CacheMode mode, const char* token) {
   return MapView(0, size, mode);
 }
 
-CmmView CmmBuffer::MapView(uint32_t offset, uint32_t size,
-                           CacheMode mode) const {
+CmmView CmmBuffer::MapView(size_t offset, size_t size, CacheMode mode) const {
   if (!impl_ || !impl_->alloc) return CmmView();
   Allocation& a = *impl_->alloc;
   if (offset + size > a.size) return CmmView();
@@ -346,7 +372,7 @@ CmmView CmmBuffer::MapView(uint32_t offset, uint32_t size,
   return CmmView(vi);
 }
 
-bool CmmBuffer::AttachExternal(uint64_t phys, uint32_t size) {
+bool CmmBuffer::AttachExternal(uint64_t phys, size_t size) {
   if (!impl_) return false;
   if (!impl_->alloc) {
     impl_->alloc = std::shared_ptr<Allocation>(new Allocation(),
@@ -385,7 +411,7 @@ uint64_t CmmBuffer::Phys() const {
   return impl_->alloc->phy;
 }
 
-uint32_t CmmBuffer::Size() const {
+size_t CmmBuffer::Size() const {
   if (!impl_ || !impl_->alloc) return 0;
   return impl_->alloc->size;
 }
@@ -396,7 +422,7 @@ void CmmBuffer::Dump(uintptr_t offset) const {
     return;
   }
   const Allocation& a = *impl_->alloc;
-  printf("[CmmBuffer] phy=0x%" PRIx64 ", size=0x%x, maps=%zu\n",
+  printf("[CmmBuffer] phy=0x%" PRIx64 ", size=0x%zx, maps=%zu\n",
          static_cast<uint64_t>(a.phy), a.size, a.views.size());
   // ByPhy at base+offset
   AX_S32 cache_type = 0;
@@ -414,7 +440,7 @@ void CmmBuffer::Dump(uintptr_t offset) const {
   std::lock_guard<std::mutex> lk(a.mtx);
   for (size_t i = 0; i < a.views.size(); ++i) {
     const ViewEntry& e = a.views[i];
-    printf("  view[%zu]: v=%p off=0x%x size=0x%x mode=%s\n", i, e.addr,
+    printf("  view[%zu]: v=%p off=0x%zx size=0x%zx mode=%s\n", i, e.addr,
            e.offset, e.size,
            (e.mode == CacheMode::kCached ? "cached" : "nonc"));
   }
@@ -466,7 +492,7 @@ bool CmmBuffer::Verify() const {
   return true;
 }
 
-CmmView CmmBuffer::MapViewFast(uint32_t offset, uint32_t size,
+CmmView CmmBuffer::MapViewFast(size_t offset, size_t size,
                                CacheMode mode) const {
   if (!impl_ || !impl_->alloc) return CmmView();
   Allocation& a = *impl_->alloc;
