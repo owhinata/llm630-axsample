@@ -370,7 +370,7 @@ bool CmmBuffer::Free() {
     return false;
   }
   // If other references (e.g., CmmView) exist, refuse to free.
-  int64_t refs = static_cast<int64_t>(impl_->alloc.use_count());
+  int64_t refs = impl_->alloc.use_count();
   if (refs > 1) {
     printf("[CmmBuffer::Free] references remain: %" PRId64 "\n", refs);
     return false;

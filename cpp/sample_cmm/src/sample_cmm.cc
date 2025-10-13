@@ -140,8 +140,7 @@ void Case001() {
   for (int i = 0; i < 10; ++i) {
     axsys::CmmView v =
         buf[i].Allocate(kLen, axsys::CacheMode::kNonCached, "cmm_001");
-    printf("  phy=0x%" PRIx64 ", v=%p\n", static_cast<uint64_t>(buf[i].Phys()),
-           v.Data());
+    printf("  phy=0x%" PRIx64 ", v=%p\n", buf[i].Phys(), v.Data());
   }
   printf("\n");
 }
@@ -292,8 +291,7 @@ void Case002() {
   for (int i = 0; i < 10; ++i) {
     axsys::CmmView v =
         buf[i].Allocate(kLen, axsys::CacheMode::kCached, "cmm_002");
-    printf("  phy=0x%" PRIx64 ", v=%p\n", static_cast<uint64_t>(buf[i].Phys()),
-           v.Data());
+    printf("  phy=0x%" PRIx64 ", v=%p\n", buf[i].Phys(), v.Data());
   }
   printf("\n");
 }
@@ -1378,7 +1376,7 @@ void Case020() {
     return;
   }
 
-  AX_U32 blk_size = plan.CommPool[0].BlkSize;
+  AX_U32 blk_size = static_cast<AX_U32>(plan.CommPool[0].BlkSize);
   AX_BLK blk = AX_POOL_GetBlock(AX_INVALID_POOLID, blk_size, nullptr);
   if (blk == AX_INVALID_BLOCKID) {
     printf("AX_POOL_GetBlock failed\n");

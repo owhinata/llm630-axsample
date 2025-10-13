@@ -29,11 +29,10 @@ class ThroughputTimer {
         std::chrono::duration<double>(end - start_).count();
     const double per_copy_sec = (copies > 0) ? (total_sec / copies) : total_sec;
     const double mib = static_cast<double>(bytes_per_copy) / (1024.0 * 1024.0);
-    printf("data size: %" PRIu64 " bytes (%.2f MiB)\n",
-           static_cast<uint64_t>(bytes_per_copy), mib);
+    printf("data size: %" PRIu64 " bytes (%.2f MiB)\n", bytes_per_copy, mib);
     printf("time: %.6f sec for %d copies\n", total_sec, copies);
     printf("      %.6f sec per %" PRIu64 " bytes (%.2f MiB)\n", per_copy_sec,
-           static_cast<uint64_t>(bytes_per_copy), mib);
+           bytes_per_copy, mib);
   }
 
  private:
@@ -86,10 +85,12 @@ class SysmapMapper {
     return true;
   }
   bool Map(AX_U64 phys_src, AX_U64 phys_dst) {
-    map_src_ = reinterpret_cast<char*>(mmap(
-        nullptr, kTestLen, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, phys_src));
-    map_dst_ = reinterpret_cast<char*>(mmap(
-        nullptr, kTestLen, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, phys_dst));
+    map_src_ = reinterpret_cast<char*>(mmap(nullptr, kTestLen,
+                                            PROT_READ | PROT_WRITE, MAP_SHARED,
+                                            fd_, static_cast<off_t>(phys_src)));
+    map_dst_ = reinterpret_cast<char*>(mmap(nullptr, kTestLen,
+                                            PROT_READ | PROT_WRITE, MAP_SHARED,
+                                            fd_, static_cast<off_t>(phys_dst)));
     if (map_src_ == MAP_FAILED || map_dst_ == MAP_FAILED) {
       printf("map fail, %" PRIuPTR ", %" PRIuPTR "\n",
              reinterpret_cast<uintptr_t>(map_src_),
@@ -120,8 +121,9 @@ class SysmapMapper {
 
 void SanityCopy(char* dst, const char* src) {
   for (int i = 0; i < 0x20; ++i) {
-    memcpy(dst + i, src + i, kTestLen - i);
-    if (memcmp(dst + i, src + i, kTestLen - i) != 0) {
+    const size_t len = static_cast<size_t>(kTestLen) - static_cast<size_t>(i);
+    memcpy(dst + i, src + i, len);
+    if (memcmp(dst + i, src + i, len) != 0) {
       printf("memcpy fail, i: %x\n", i);
     }
   }

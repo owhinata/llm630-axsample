@@ -132,7 +132,7 @@ class BlockGuard {
     blk_ = AX_POOL_GetBlock(pool_id, want_size, nullptr);
     if (blk_ == AX_INVALID_BLOCKID) {
       printf("AX_POOL_GetBlock failed (pool=%d, size=%" PRIu64 ")\n", pool_id,
-             static_cast<uint64_t>(want_size));
+             want_size);
       return false;
     }
     printf("AX_POOL_GetBlock success! BlkId=0x%X\n", blk_);

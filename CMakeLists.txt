@@ -10,6 +10,32 @@ project(llm630_axsample LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Strict warnings for C++ builds
+add_compile_options(
+    $<$<COMPILE_LANGUAGE:CXX>:-Werror>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wconversion>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wsign-conversion>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wshadow>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wuseless-cast>
+    $<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wformat=2>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wnull-dereference>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wlogical-op>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wduplicated-cond>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wduplicated-branches>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wsuggest-override>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wunused>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wunused-variable>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wunused-parameter>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wunused-but-set-variable>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wunused-but-set-parameter>
+)
+
 set(VALID_BUILD_TYPES Debug Release RelWithDebInfo MinSizeRel Contribution)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
