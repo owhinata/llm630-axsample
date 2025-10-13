@@ -23,16 +23,34 @@ class CmmView {
 
   void* Data() const;
   uint32_t Size() const;
-  uint32_t Offset() const;
   CacheMode Mode() const;
 
-  bool Flush();
-  bool Invalidate();
-
-  uint64_t Phys() const;
-
-  bool Ok() const;
+  explicit operator bool() const;
   void Reset();
+
+  bool Flush();
+  bool Flush(uint32_t offset);
+  bool Flush(uint32_t offset, uint32_t size);
+
+  bool Invalidate();
+  bool Invalidate(uint32_t offset);
+  bool Invalidate(uint32_t offset, uint32_t size);
+
+  // Create an additional view within this view's range.
+  // The offset/size are relative to this view, not the allocation base.
+  CmmView MapView(uint32_t offset, uint32_t size, CacheMode mode) const;
+
+  // Fast mapping variant within this view's range.
+  CmmView MapViewFast(uint32_t offset, uint32_t size, CacheMode mode) const;
+
+  // Obtain a buffer that shares this view's allocation.
+  CmmBuffer MakeBuffer() const;
+
+  // Diagnostics
+  uint64_t Phys() const;
+  uint32_t Offset() const;
+
+  void Dump(uintptr_t offset = 0) const;
 
  private:
   friend class CmmBuffer;
@@ -69,7 +87,7 @@ class CmmBuffer {
   // Diagnostics
   uint64_t Phys() const;
   uint32_t Size() const;
-  void Dump() const;
+  void Dump(uintptr_t offset = 0) const;
   bool Verify() const;
 
   // Partition helpers (hide AX_SYS from apps)
@@ -78,10 +96,20 @@ class CmmBuffer {
     uint64_t phys;
     uint32_t size_kb;
   };
-  static bool QueryPartitions(std::vector<PartitionInfo>* out);
+  static std::vector<PartitionInfo> QueryPartitions();
   static bool FindAnonymous(PartitionInfo* out);
 
+  // Wrappers for AX_SYS_MemQueryStatus / AX_SYS_MemGetMaxFreeRegionInfo
+  struct CmmStatus {
+    uint32_t total_size;
+    uint32_t remain_size;
+    uint32_t block_count;
+    std::vector<PartitionInfo> partitions;
+  };
+  static bool MemQueryStatus(CmmStatus* out);
+
  private:
+  friend class CmmView;
   struct Impl;  // internal
   Impl* impl_;
 };
