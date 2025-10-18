@@ -77,9 +77,7 @@ static bool ReadCmmUseInfo(int* used_kb, int* block_number) {
   return found;
 }
 
-// Mapping-aware memcpy helper using CmmView::MapView within the view range.
-// - If a view is cached, map a temporary non-cached alias from offset 0 for
-//   the requested size, then copy. Temporary views auto-unmap on scope exit.
+// Mapping-aware memcpy helper using Result-based view aliases
 static int MemcpyView(const axsys::CmmView& src, const axsys::CmmView& dst,
                       uint32_t size) {
   if (!src || !dst || size == 0) return -1;
@@ -92,13 +90,21 @@ static int MemcpyView(const axsys::CmmView& src, const axsys::CmmView& dst,
   axsys::CmmView dst_alias;
 
   if (src.Mode() == axsys::CacheMode::kCached) {
-    src_alias = src.MapView(0, size, axsys::CacheMode::kNonCached);
-    if (!src_alias) return -1;
+    auto rr = src.MapView(0, size, axsys::CacheMode::kNonCached);
+    if (!rr) {
+      printf("View::MapView failed: %s\n", rr.Message().c_str());
+      return -1;
+    }
+    src_alias = rr.MoveValue();
     s_ptr = src_alias.Data();
   }
   if (dst.Mode() == axsys::CacheMode::kCached) {
-    dst_alias = dst.MapView(0, size, axsys::CacheMode::kNonCached);
-    if (!dst_alias) return -1;
+    auto rr = dst.MapView(0, size, axsys::CacheMode::kNonCached);
+    if (!rr) {
+      printf("View::MapView failed: %s\n", rr.Message().c_str());
+      return -1;
+    }
+    dst_alias = rr.MoveValue();
     d_ptr = dst_alias.Data();
   }
 
@@ -138,8 +144,14 @@ void Case001() {
   printf("[001] MemAlloc/MemFree (non-cached)\n");
   axsys::CmmBuffer buf[10];
   for (int i = 0; i < 10; ++i) {
-    axsys::CmmView v =
+    auto alloc_result =
         buf[i].Allocate(kLen, axsys::CacheMode::kNonCached, "cmm_001");
+    if (!alloc_result) {
+      printf("Allocate failed: %s\n", alloc_result.Message().c_str());
+      continue;
+    }
+    axsys::CmmView v = alloc_result.MoveValue();
+
     printf("  phy=0x%" PRIx64 ", v=%p\n", buf[i].Phys(), v.Data());
   }
   printf("\n");
@@ -169,8 +181,14 @@ static void Case001r() {
   }
   {
     axsys::CmmBuffer buf;
-    axsys::CmmView v =
+    auto alloc_result =
         buf.Allocate(kLen, axsys::CacheMode::kNonCached, "cmm_001r");
+    if (!alloc_result) {
+      printf("Allocate failed: %s\n", alloc_result.Message().c_str());
+      return;
+    }
+    axsys::CmmView v = alloc_result.MoveValue();
+
     phys = buf.Phys();
     void* old_v = v.Data();
     printf("  allocated phys=0x%" PRIx64 ", v=%p\n",
@@ -227,7 +245,14 @@ static void Case001v() {
   }
   {
     axsys::CmmBuffer buf;
-    v = buf.Allocate(kLen, axsys::CacheMode::kNonCached, "cmm_001v");
+    auto alloc_result =
+        buf.Allocate(kLen, axsys::CacheMode::kNonCached, "cmm_001v");
+    if (!alloc_result) {
+      printf("Allocate failed: %s\n", alloc_result.Message().c_str());
+      return;
+    }
+    v = alloc_result.MoveValue();
+
     phys = buf.Phys();
     printf("  allocated phys=0x%" PRIx64 ", v=%p\n",
            static_cast<uint64_t>(phys), v.Data());
@@ -289,8 +314,13 @@ void Case002() {
   printf("[002] MemAllocCached/MemFree (cached)\n");
   axsys::CmmBuffer buf[10];
   for (int i = 0; i < 10; ++i) {
-    axsys::CmmView v =
+    auto alloc_result =
         buf[i].Allocate(kLen, axsys::CacheMode::kCached, "cmm_002");
+    if (!alloc_result) {
+      printf("Allocate failed: %s\n", alloc_result.Message().c_str());
+      continue;
+    }
+    axsys::CmmView v = alloc_result.MoveValue();
     printf("  phy=0x%" PRIx64 ", v=%p\n", buf[i].Phys(), v.Data());
   }
   printf("\n");
@@ -322,8 +352,14 @@ void Case002() {
 void Case003() {
   printf("[003] Verify/Dump (non-cached virt)\n");
   axsys::CmmBuffer buf;
-  axsys::CmmView v =
+  auto alloc_result =
       buf.Allocate(1 * 1024 * 1024, axsys::CacheMode::kNonCached, "cmm_003");
+  if (!alloc_result) {
+    printf("Allocate failed: %s\n", alloc_result.Message().c_str());
+    return;
+  }
+  axsys::CmmView v = alloc_result.MoveValue();
+
   buf.Dump();
   v.Dump(0);
   v.Dump(0x1000);
@@ -343,8 +379,14 @@ void Case003() {
 static void Case003r() {
   printf("[003r] Verify view unmap by Reset\n");
   axsys::CmmBuffer buf;
-  axsys::CmmView v =
+  auto alloc_result =
       buf.Allocate(1 * 1024 * 1024, axsys::CacheMode::kNonCached, "cmm_003r");
+  if (!alloc_result) {
+    printf("Allocate failed: %s\n", alloc_result.Message().c_str());
+    return;
+  }
+  axsys::CmmView v = alloc_result.MoveValue();
+
   void* old_v = v.Data();
   printf("  base v=%p\n", old_v);
   bool in_maps = AddrInProcMaps(old_v);
@@ -385,9 +427,21 @@ void Case004() {
   printf("[004] Mmap/Munmap (non-cached)\n");
   const uint32_t size = 1 * 1024 * 1024;
   axsys::CmmBuffer buf;
-  axsys::CmmView vbase =
+  auto alloc_result =
       buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_004");
-  axsys::CmmView vmap = buf.MapView(0, size, axsys::CacheMode::kNonCached);
+  if (!alloc_result) {
+    printf("Allocate failed: %s\n", alloc_result.Message().c_str());
+    return;
+  }
+  axsys::CmmView vbase = alloc_result.MoveValue();
+
+  auto map_result = buf.MapView(0, size, axsys::CacheMode::kNonCached);
+  if (!map_result) {
+    printf("MapView failed: %s\n", map_result.Message().c_str());
+    return;
+  }
+  axsys::CmmView vmap = map_result.MoveValue();
+
   printf("  base=%p map=%p\n", vbase.Data(), vmap.Data());
 
   // write pattern via the mapped view and print first 20 bytes
@@ -433,13 +487,27 @@ void Case005() {
   printf("[005] MmapCache/Flush/Munmap (cached)\n");
   const uint32_t size = 1 * 1024 * 1024;
   axsys::CmmBuffer buf;
-  axsys::CmmView vbase =
+  auto alloc_result =
       buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_005");
-  axsys::CmmView vcache = buf.MapView(0, size, axsys::CacheMode::kCached);
+  if (!alloc_result) {
+    printf("Allocate failed: %s\n", alloc_result.Message().c_str());
+    return;
+  }
+  axsys::CmmView vbase = alloc_result.MoveValue();
+
+  auto map_result = buf.MapView(0, size, axsys::CacheMode::kCached);
+  if (!map_result) {
+    printf("MapView failed: %s\n", map_result.Message().c_str());
+    return;
+  }
+  axsys::CmmView vcache = map_result.MoveValue();
+
   printf("  base=%p map=%p\n", vbase.Data(), vcache.Data());
 
   memset(vcache.Data(), 0xfe, size);
-  vcache.Flush();
+  auto flush_result = vcache.Flush();
+  if (!flush_result)
+    printf("Flush failed: %s\n", flush_result.Message().c_str());
 
   printf("  ");
   for (int i = 0; i < 16; ++i) {
@@ -488,9 +556,19 @@ void Case006() {
   printf("[006] MmapCache/Invalidate/Munmap (cached)\n");
   const uint32_t size = 1 * 1024 * 1024;
   axsys::CmmBuffer buf;
-  axsys::CmmView vbase =
+  auto alloc_result =
       buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_006");
-  axsys::CmmView vcache = buf.MapView(0, size, axsys::CacheMode::kCached);
+  if (!alloc_result) {
+    printf("Allocate failed: %s\n", alloc_result.Message().c_str());
+    return;
+  }
+  axsys::CmmView vbase = alloc_result.MoveValue();
+  auto map_result = buf.MapView(0, size, axsys::CacheMode::kCached);
+  if (!map_result) {
+    printf("MapView failed: %s\n", map_result.Message().c_str());
+    return;
+  }
+  axsys::CmmView vcache = map_result.MoveValue();
   printf("  base=%p map=%p\n", vbase.Data(), vcache.Data());
 
   memset(vbase.Data(), 0xbc, size);
@@ -512,7 +590,9 @@ void Case006() {
   }
   printf("\n");
 
-  bool invalidated = vcache.Invalidate();
+  auto rr = vcache.Invalidate();
+  bool invalidated = static_cast<bool>(rr);
+  if (!rr) printf("Invalidate failed: %s\n", rr.Message().c_str());
   if (!invalidated) {
     printf("  invalidate failed\n");
     printf("  result: fail\n");
@@ -576,16 +656,32 @@ void Case007() {
   for (uint32_t j = 1; j <= kTests; ++j) {
     const uint32_t sz = j * 1024 * 1024;
     axsys::CmmBuffer src, dst;
-    axsys::CmmView vsrc =
-        src.Allocate(sz, axsys::CacheMode::kCached, "cmm_007_src");
-    axsys::CmmView vdst =
+    auto alloc_src = src.Allocate(sz, axsys::CacheMode::kCached, "cmm_007_src");
+    if (!alloc_src) {
+      printf("Allocate failed: %s\n", alloc_src.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView vsrc = alloc_src.MoveValue();
+    auto alloc_dst =
         dst.Allocate(sz, axsys::CacheMode::kNonCached, "cmm_007_dst");
+    if (!alloc_dst) {
+      printf("Allocate failed: %s\n", alloc_dst.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView vdst = alloc_dst.MoveValue();
 
     memset(vsrc.Data(), 0x78, sz);
     for (uint32_t i = 0; i < 256 && i < sz; ++i) {
       static_cast<uint8_t*>(vsrc.Data())[i] = static_cast<uint8_t>(255 - i);
     }
-    bool flushed = vsrc.Flush();
+    auto flush_result = vsrc.Flush();
+    bool flushed = static_cast<bool>(flush_result);
+    if (!flush_result) {
+      printf("  flush failed at j=%u size=0x%x: %s\n", j, sz,
+             flush_result.Message().c_str());
+    }
     if (!flushed) {
       printf("  flush failed at j=%u size=0x%x\n", j, sz);
       ++fail;
@@ -640,10 +736,22 @@ void Case008() {
   for (uint32_t j = 1; j <= kTests; ++j) {
     const uint32_t sz = j * 1024 * 1024;
     axsys::CmmBuffer src, dst;
-    axsys::CmmView vsrc =
+    auto alloc_src_008 =
         src.Allocate(sz, axsys::CacheMode::kNonCached, "cmm_008_src");
-    axsys::CmmView vdst =
+    if (!alloc_src_008) {
+      printf("Allocate failed: %s\n", alloc_src_008.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView vsrc = alloc_src_008.MoveValue();
+    auto alloc_dst_008 =
         dst.Allocate(sz, axsys::CacheMode::kCached, "cmm_008_dst");
+    if (!alloc_dst_008) {
+      printf("Allocate failed: %s\n", alloc_dst_008.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView vdst = alloc_dst_008.MoveValue();
 
     memset(vsrc.Data(), 0xff, sz);
     for (uint32_t i = 0; i < 256 && i < sz; ++i) {
@@ -655,7 +763,12 @@ void Case008() {
       static_cast<uint8_t*>(vdst.Data())[i] = static_cast<uint8_t>(i);
     }
 
-    bool flushed = vdst.Flush();
+    auto rflush = vdst.Flush();
+    bool flushed = static_cast<bool>(rflush);
+    if (!rflush) {
+      printf("  flush failed at j=%u size=0x%x: %s\n", j, sz,
+             rflush.Message().c_str());
+    }
     if (!flushed) {
       printf("  flush failed at j=%u size=0x%x\n", j, sz);
       ++fail;
@@ -668,7 +781,12 @@ void Case008() {
       continue;
     }
 
-    bool invalidated = vdst.Invalidate();
+    auto rinv = vdst.Invalidate();
+    bool invalidated = static_cast<bool>(rinv);
+    if (!rinv) {
+      printf("  invalidate failed at j=%u size=0x%x: %s\n", j, sz,
+             rinv.Message().c_str());
+    }
     if (!invalidated) {
       printf("  invalidate failed at j=%u size=0x%x\n", j, sz);
       ++fail;
@@ -722,17 +840,31 @@ void Case009() {
   uint32_t pass = 0, fail = 0;
   for (uint32_t t = 0; t < kTests; ++t) {
     axsys::CmmBuffer src, dst;
-    axsys::CmmView vsrc =
+    auto alloc_src_result =
         src.Allocate(size, axsys::CacheMode::kCached, "cmm_009_src");
-    axsys::CmmView vdst =
+    if (!alloc_src_result) {
+      printf("Allocate failed: %s\n", alloc_src_result.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView vsrc = alloc_src_result.MoveValue();
+    auto alloc_dst_result =
         dst.Allocate(size, axsys::CacheMode::kNonCached, "cmm_009_dst");
+    if (!alloc_dst_result) {
+      printf("Allocate failed: %s\n", alloc_dst_result.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView vdst = alloc_dst_result.MoveValue();
 
     memset(vsrc.Data(), 0x78, size);
     for (uint32_t i = 0; i < 256 && i < size; ++i) {
       static_cast<uint8_t*>(vsrc.Data())[i] = static_cast<uint8_t>(255 - i);
     }
 
-    if (!vsrc.Flush(offset, size - offset)) {
+    auto flush_result = vsrc.Flush(offset, size - offset);
+    if (!flush_result) {
+      printf("  flush failed: %s\n", flush_result.Message().c_str());
       ++fail;
       continue;
     }
@@ -791,17 +923,31 @@ void Case010() {
   uint32_t pass = 0, fail = 0;
   for (uint32_t t = 0; t < kTests; ++t) {
     axsys::CmmBuffer src, dst;
-    axsys::CmmView vsrc =
+    auto alloc_src_result =
         src.Allocate(size, axsys::CacheMode::kCached, "cmm_010_src");
-    axsys::CmmView vdst =
+    if (!alloc_src_result) {
+      printf("Allocate failed: %s\n", alloc_src_result.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView vsrc = alloc_src_result.MoveValue();
+    auto alloc_dst_result =
         dst.Allocate(size, axsys::CacheMode::kNonCached, "cmm_010_dst");
+    if (!alloc_dst_result) {
+      printf("Allocate failed: %s\n", alloc_dst_result.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView vdst = alloc_dst_result.MoveValue();
 
     memset(vsrc.Data(), 0x78, size);
     for (uint32_t i = 0; i < 256 && i < size; ++i) {
       static_cast<uint8_t*>(vsrc.Data())[i] = static_cast<uint8_t>(255 - i);
     }
 
-    if (!vsrc.Flush(offset, size - offset)) {
+    auto flush_result_010 = vsrc.Flush(offset, size - offset);
+    if (!flush_result_010) {
+      printf("Flush failed: %s\n", flush_result_010.Message().c_str());
       ++fail;
       continue;
     }
@@ -861,17 +1007,31 @@ void Case011() {
   uint32_t pass = 0, fail = 0;
   for (uint32_t t = 0; t < kTests; ++t) {
     axsys::CmmBuffer src, dst;
-    axsys::CmmView vsrc =
+    auto alloc_src_result =
         src.Allocate(size, axsys::CacheMode::kCached, "cmm_011_src");
-    axsys::CmmView vdst =
+    if (!alloc_src_result) {
+      printf("Allocate failed: %s\n", alloc_src_result.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView vsrc = alloc_src_result.MoveValue();
+    auto alloc_dst_result =
         dst.Allocate(size, axsys::CacheMode::kNonCached, "cmm_011_dst");
+    if (!alloc_dst_result) {
+      printf("Allocate failed: %s\n", alloc_dst_result.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView vdst = alloc_dst_result.MoveValue();
 
     memset(vsrc.Data(), 0x88, size);
     for (uint32_t i = 0; i < 256 && i < size; ++i) {
       static_cast<uint8_t*>(vsrc.Data())[i] = static_cast<uint8_t>(255 - i);
     }
 
-    if (!vsrc.Flush(offset, len)) {
+    auto flush_result_011 = vsrc.Flush(offset, len);
+    if (!flush_result_011) {
+      printf("Flush failed: %s\n", flush_result_011.Message().c_str());
       ++fail;
       continue;
     }
@@ -933,17 +1093,31 @@ void Case012() {
   uint32_t pass = 0, fail = 0;
   for (uint32_t t = 0; t < kTests; ++t) {
     axsys::CmmBuffer src, dst;
-    axsys::CmmView vsrc =
+    auto alloc_src_result =
         src.Allocate(size, axsys::CacheMode::kCached, "cmm_012_src");
-    axsys::CmmView vdst =
+    if (!alloc_src_result) {
+      printf("Allocate failed: %s\n", alloc_src_result.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView vsrc = alloc_src_result.MoveValue();
+    auto alloc_dst_result =
         dst.Allocate(size, axsys::CacheMode::kNonCached, "cmm_012_dst");
+    if (!alloc_dst_result) {
+      printf("Allocate failed: %s\n", alloc_dst_result.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView vdst = alloc_dst_result.MoveValue();
 
     memset(vsrc.Data(), 0x88, size);
     for (uint32_t i = 0; i < 256 && i < size; ++i) {
       static_cast<uint8_t*>(vsrc.Data())[i] = static_cast<uint8_t>(255 - i);
     }
 
-    if (!vsrc.Flush(offset, len)) {
+    auto flush_result_012 = vsrc.Flush(offset, len);
+    if (!flush_result_012) {
+      printf("Flush failed: %s\n", flush_result_012.Message().c_str());
       ++fail;
       continue;
     }
@@ -1003,14 +1177,27 @@ void Case013() {
   uint32_t pass = 0, fail = 0;
   for (uint32_t t = 0; t < kTests; ++t) {
     axsys::CmmBuffer buf;
-    axsys::CmmView base =
+    auto base_result =
         buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_013_base");
-    axsys::CmmView cached = buf.MapView(0, size, axsys::CacheMode::kCached);
+    if (!base_result) {
+      ++fail;
+      continue;
+    }
+    axsys::CmmView base = base_result.MoveValue();
+    auto map_cached_result = buf.MapView(0, size, axsys::CacheMode::kCached);
+    if (!map_cached_result) {
+      printf("MapView failed: %s\n", map_cached_result.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView cached = map_cached_result.MoveValue();
 
     memset(base.Data(), 0xfd, size);
     memset(cached.Data(), 0xfe, size);
 
-    if (!cached.Flush(offset, len)) {
+    auto flush_result_013 = cached.Flush(offset, len);
+    if (!flush_result_013) {
+      printf("Flush failed: %s\n", flush_result_013.Message().c_str());
       ++fail;
       continue;
     }
@@ -1058,14 +1245,27 @@ void Case014() {
   uint32_t pass = 0, fail = 0;
   for (uint32_t t = 0; t < kTests; ++t) {
     axsys::CmmBuffer buf;
-    axsys::CmmView base =
+    auto base_result2 =
         buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_014_base");
-    axsys::CmmView cached = buf.MapView(0, size, axsys::CacheMode::kCached);
+    if (!base_result2) {
+      ++fail;
+      continue;
+    }
+    axsys::CmmView base = base_result2.MoveValue();
+    auto map_cached_result2 = buf.MapView(0, size, axsys::CacheMode::kCached);
+    if (!map_cached_result2) {
+      printf("MapView failed: %s\n", map_cached_result2.Message().c_str());
+      ++fail;
+      continue;
+    }
+    axsys::CmmView cached = map_cached_result2.MoveValue();
 
     memset(base.Data(), 0x85, size);
     memset(cached.Data(), 0x66, size);
 
-    if (!cached.Flush(offset, len)) {
+    auto flush_result2 = cached.Flush(offset, len);
+    if (!flush_result2) {
+      printf("Flush failed: %s\n", flush_result2.Message().c_str());
       ++fail;
       continue;
     }
@@ -1125,9 +1325,18 @@ void Case015() {
       ++fail;
       continue;
     }
-    axsys::CmmView nc =
-        buf.MapView(0, block_size, axsys::CacheMode::kNonCached);
-    axsys::CmmView c = buf.MapView(0, block_size, axsys::CacheMode::kCached);
+    auto map_nc_015 = buf.MapView(0, block_size, axsys::CacheMode::kNonCached);
+    if (!map_nc_015) {
+      ++fail;
+      continue;
+    }
+    axsys::CmmView nc = map_nc_015.MoveValue();
+    auto map_c_015 = buf.MapView(0, block_size, axsys::CacheMode::kCached);
+    if (!map_c_015) {
+      ++fail;
+      continue;
+    }
+    axsys::CmmView c = map_c_015.MoveValue();
 
     if (!nc || !c) {
       ++fail;
@@ -1195,9 +1404,18 @@ void Case016() {
       ++fail;
       continue;
     }
-    axsys::CmmView nc =
-        buf.MapView(0, block_size, axsys::CacheMode::kNonCached);
-    axsys::CmmView c = buf.MapView(0, block_size, axsys::CacheMode::kCached);
+    auto map_nc_016 = buf.MapView(0, block_size, axsys::CacheMode::kNonCached);
+    if (!map_nc_016) {
+      ++fail;
+      continue;
+    }
+    axsys::CmmView nc = map_nc_016.MoveValue();
+    auto map_c_016 = buf.MapView(0, block_size, axsys::CacheMode::kCached);
+    if (!map_c_016) {
+      ++fail;
+      continue;
+    }
+    axsys::CmmView c = map_c_016.MoveValue();
 
     if (!nc || !c) {
       ++fail;
@@ -1250,11 +1468,15 @@ void Case016() {
 void Case017() {
   printf("[017] Block info (cached virt)\n");
   axsys::CmmBuffer buf;
-  axsys::CmmView v =
-      buf.Allocate(1 * 1024 * 1024, axsys::CacheMode::kCached, "cmm_017");
-  buf.Dump();
-  v.Dump(0);
-  v.Dump(0x1000);
+  {
+    auto r =
+        buf.Allocate(1 * 1024 * 1024, axsys::CacheMode::kCached, "cmm_017");
+    if (!r) return;
+    axsys::CmmView v = r.MoveValue();
+    buf.Dump();
+    v.Dump(0);
+    v.Dump(0x1000);
+  }
   printf("  verify=%s\n", buf.Verify() ? "true" : "false");
   printf("\n");
 }
@@ -1281,12 +1503,16 @@ void Case017() {
 void Case018() {
   printf("[018] Block info (mapped non-cached)\n");
   axsys::CmmBuffer buf;
-  axsys::CmmView v =
-      buf.Allocate(1 * 1024 * 1024, axsys::CacheMode::kNonCached, "cmm_018");
-  buf.Dump();
-  v.Dump(0);
-  v.Dump(0x1000);
-  v.Dump(0x11ef);
+  {
+    auto r =
+        buf.Allocate(1 * 1024 * 1024, axsys::CacheMode::kNonCached, "cmm_018");
+    if (!r) return;
+    axsys::CmmView v = r.MoveValue();
+    buf.Dump();
+    v.Dump(0);
+    v.Dump(0x1000);
+    v.Dump(0x11ef);
+  }
   printf("  verify=%s\n", buf.Verify() ? "true" : "false");
   printf("\n");
 }
@@ -1316,10 +1542,13 @@ void Case018() {
 void Case019() {
   printf("[019] Block info (mapped cached)\n");
   axsys::CmmBuffer buf;
-  axsys::CmmView vbase =
+  auto base_res =
       buf.Allocate(1 * 1024 * 1024, axsys::CacheMode::kNonCached, "cmm_019");
-  axsys::CmmView vcache =
-      buf.MapView(0, vbase.Size(), axsys::CacheMode::kCached);
+  if (!base_res) return;
+  axsys::CmmView vbase = base_res.MoveValue();
+  auto cache_res = buf.MapView(0, vbase.Size(), axsys::CacheMode::kCached);
+  if (!cache_res) return;
+  axsys::CmmView vcache = cache_res.MoveValue();
   // ByVirt on cached alias and base
   vbase.Dump(0);
   vcache.Dump(0);
@@ -1475,9 +1704,14 @@ void Case021() {
   printf("[021] MmapFast address consistency\n");
   const uint32_t size = 4 * 1024 * 1024;
   axsys::CmmBuffer buf;
-  axsys::CmmView vbase =
+  auto base_res_021 =
       buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_021");
-  axsys::CmmView vmap = buf.MapViewFast(0, size, axsys::CacheMode::kNonCached);
+  if (!base_res_021) return;
+  axsys::CmmView vbase = base_res_021.MoveValue();
+  auto map_nc_fast_result =
+      buf.MapViewFast(0, size, axsys::CacheMode::kNonCached);
+  if (!map_nc_fast_result) return;
+  axsys::CmmView vmap = map_nc_fast_result.MoveValue();
   printf("  base=%p map=%p\n", vbase.Data(), vmap.Data());
 
   memset(vmap.Data(), 0x78, size);
@@ -1503,7 +1737,10 @@ void Case021() {
   }
   printf("  result: %s\n", ok ? "pass" : "fail");
 
-  axsys::CmmView vmap2 = buf.MapViewFast(0, size, axsys::CacheMode::kNonCached);
+  auto map_nc_fast_result2 =
+      buf.MapViewFast(0, size, axsys::CacheMode::kNonCached);
+  if (!map_nc_fast_result2) return;
+  axsys::CmmView vmap2 = map_nc_fast_result2.MoveValue();
   printf("  map1=%p map2=%p%s\n", vmap.Data(), vmap2.Data(),
          (vmap.Data() == vmap2.Data() ? " (same)" : " (diff)"));
   printf("\n");
@@ -1529,12 +1766,19 @@ void Case022() {
   printf("[022] MmapCacheFast address consistency\n");
   const uint32_t size = 4 * 1024 * 1024;
   axsys::CmmBuffer buf;
-  (void)buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_022");
-  axsys::CmmView v1 = buf.MapViewFast(0, size, axsys::CacheMode::kCached);
-  if (!v1) {
-    printf("  MmapCacheFast failed\n");
+  {
+    auto r = buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_022");
+    if (!r) {
+      printf("Allocate failed: %s\n", r.Message().c_str());
+      return;
+    }
+  }
+  auto map_c_fast_result = buf.MapViewFast(0, size, axsys::CacheMode::kCached);
+  if (!map_c_fast_result) {
+    printf("MapViewFast failed: %s\n", map_c_fast_result.Message().c_str());
     return;
   }
+  axsys::CmmView v1 = map_c_fast_result.MoveValue();
 
   memset(v1.Data(), 0x78, size);
 
@@ -1545,7 +1789,9 @@ void Case022() {
   }
   printf("\n");
 
-  axsys::CmmView v2 = buf.MapViewFast(0, size, axsys::CacheMode::kCached);
+  auto map_c_fast_result2 = buf.MapViewFast(0, size, axsys::CacheMode::kCached);
+  if (!map_c_fast_result2) return;
+  axsys::CmmView v2 = map_c_fast_result2.MoveValue();
   printf("  map1=%p map2=%p%s\n", v1.Data(), v2.Data(),
          (v1.Data() == v2.Data() ? " (same)" : " (diff)"));
   printf("\n");
@@ -1567,17 +1813,24 @@ void Case023() {
   printf("[023] MmapCacheFast + MflushCache + Munmap\n");
   const uint32_t size = 1 * 1024 * 1024;
   axsys::CmmBuffer buf;
-  axsys::CmmView vbase =
-      buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_023");
+  auto base_r_023 = buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_023");
+  if (!base_r_023) return;
+  axsys::CmmView vbase = base_r_023.MoveValue();
   memset(vbase.Data(), 0xfd, size);
 
-  axsys::CmmView vcache = buf.MapViewFast(0, size, axsys::CacheMode::kCached);
+  auto map_c_fast_result = buf.MapViewFast(0, size, axsys::CacheMode::kCached);
+  if (!map_c_fast_result) return;
+  axsys::CmmView vcache = map_c_fast_result.MoveValue();
   if (!vcache) {
     printf("  MmapCacheFast failed\n");
     return;
   }
   memset(vcache.Data(), 0xfe, size);
-  bool flushed = vcache.Flush();
+  auto flush_result = vcache.Flush();
+  bool flushed = static_cast<bool>(flush_result);
+  if (!flushed) {
+    printf("Flush failed: %s\n", flush_result.Message().c_str());
+  }
   if (!flushed) {
     printf("  Flush failed\n");
     printf("  result: fail\n\n");
@@ -1629,9 +1882,12 @@ void Case024() {
   printf("[024] MmapCacheFast + MinvalidateCache + Munmap\n");
   const uint32_t size = 1 * 1024 * 1024;
   axsys::CmmBuffer buf;
-  axsys::CmmView vbase =
-      buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_024");
-  axsys::CmmView vcache = buf.MapViewFast(0, size, axsys::CacheMode::kCached);
+  auto base_r_024 = buf.Allocate(size, axsys::CacheMode::kNonCached, "cmm_024");
+  if (!base_r_024) return;
+  axsys::CmmView vbase = base_r_024.MoveValue();
+  auto map_c_fast_result = buf.MapViewFast(0, size, axsys::CacheMode::kCached);
+  if (!map_c_fast_result) return;
+  axsys::CmmView vcache = map_c_fast_result.MoveValue();
   if (!vcache) {
     printf("  MmapCacheFast failed\n");
     return;
@@ -1656,7 +1912,11 @@ void Case024() {
   }
   printf("\n");
 
-  bool invalidated = vcache.Invalidate();
+  auto invalidate_result = vcache.Invalidate();
+  bool invalidated = static_cast<bool>(invalidate_result);
+  if (!invalidated) {
+    printf("Invalidate failed: %s\n", invalidate_result.Message().c_str());
+  }
   if (!invalidated) {
     printf("  Invalidate failed\n");
     printf("  result: fail\n\n");

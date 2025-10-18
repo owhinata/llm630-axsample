@@ -6,6 +6,9 @@
 #include <string>
 #include <vector>
 
+#include "axsys/error.hpp"
+#include "axsys/result.hpp"
+
 namespace axsys {
 
 enum class CacheMode { kNonCached = 0, kCached = 1 };
@@ -31,21 +34,21 @@ class CmmView {
   void Reset();
 
   // Flush cache for [offset, offset+size) range. SIZE_MAX means flush to end.
-  bool Flush(size_t offset = 0, size_t size = SIZE_MAX);
+  Result<void> Flush(size_t offset = 0, size_t size = SIZE_MAX);
 
   // Invalidate cache for [offset, offset+size) range. SIZE_MAX means invalidate
   // to end.
-  bool Invalidate(size_t offset = 0, size_t size = SIZE_MAX);
+  Result<void> Invalidate(size_t offset = 0, size_t size = SIZE_MAX);
 
   // Create an additional view within this view's range.
   // The offset/size are relative to this view, not the allocation base.
-  CmmView MapView(size_t offset, size_t size, CacheMode mode) const;
+  Result<CmmView> MapView(size_t offset, size_t size, CacheMode mode) const;
 
   // Fast mapping variant within this view's range.
-  CmmView MapViewFast(size_t offset, size_t size, CacheMode mode) const;
+  Result<CmmView> MapViewFast(size_t offset, size_t size, CacheMode mode) const;
 
   // Obtain a buffer that shares this view's allocation.
-  CmmBuffer MakeBuffer() const;
+  Result<CmmBuffer> MakeBuffer() const;
 
   // Diagnostics
   uint64_t Phys() const;
@@ -70,23 +73,23 @@ class CmmBuffer {
   ~CmmBuffer();
 
   // Allocate ownership and return a base view (offset 0..size)
-  CmmView Allocate(size_t size, CacheMode mode, const char* token);
+  Result<CmmView> Allocate(size_t size, CacheMode mode, const char* token);
 
   // Free the allocation (requires no remaining views)
-  bool Free();
+  Result<void> Free();
 
   // Attach to an external (non-owned) physical range; enables MapView*
   // Free() will only check no open views and reset, without MemFree.
-  bool AttachExternal(uint64_t phys, size_t size);
+  Result<void> AttachExternal(uint64_t phys, size_t size);
 
   // Detach from the currently attached external range.
-  bool DetachExternal();
+  Result<void> DetachExternal();
 
   // Create an additional view
-  CmmView MapView(size_t offset, size_t size, CacheMode mode) const;
+  Result<CmmView> MapView(size_t offset, size_t size, CacheMode mode) const;
 
   // Create an additional view using AX_SYS_MmapFast/AX_SYS_MmapCacheFast
-  CmmView MapViewFast(size_t offset, size_t size, CacheMode mode) const;
+  Result<CmmView> MapViewFast(size_t offset, size_t size, CacheMode mode) const;
 
   // Diagnostics
   uint64_t Phys() const;
