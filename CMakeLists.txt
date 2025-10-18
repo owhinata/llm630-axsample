@@ -79,6 +79,41 @@ endif()
 
 add_subdirectory(cpp)
 
+# GoogleTest via ExternalProject (no install)
+include(ExternalProject)
+set(_GTEST_SRC_DIR "${CMAKE_SOURCE_DIR}/third_party/googletest")
+set(_GTEST_BIN_DIR "${CMAKE_BINARY_DIR}/third_party/googletest")
+if(EXISTS "${_GTEST_SRC_DIR}/CMakeLists.txt")
+  ExternalProject_Add(googletest
+    SOURCE_DIR "${_GTEST_SRC_DIR}"
+    BINARY_DIR "${_GTEST_BIN_DIR}"
+    CMAKE_ARGS
+      -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+      -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+      -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+      -DCMAKE_SYSTEM_NAME=${CMAKE_SYSTEM_NAME}
+      -DCMAKE_SYSTEM_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR}
+      -DCMAKE_FIND_ROOT_PATH=${CMAKE_FIND_ROOT_PATH}
+      -DBUILD_GTEST=ON
+      -DBUILD_GMOCK=ON
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    INSTALL_COMMAND ""
+  )
+
+  # Import static libraries built by the external project
+  add_library(gtest STATIC IMPORTED GLOBAL)
+  set_target_properties(gtest PROPERTIES
+    IMPORTED_LOCATION "${_GTEST_BIN_DIR}/lib/libgtest.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${_GTEST_SRC_DIR}/googletest/include")
+  add_dependencies(gtest googletest)
+
+  add_library(gtest_main STATIC IMPORTED GLOBAL)
+  set_target_properties(gtest_main PROPERTIES
+    IMPORTED_LOCATION "${_GTEST_BIN_DIR}/lib/libgtest_main.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${_GTEST_SRC_DIR}/googletest/include")
+  add_dependencies(gtest_main googletest)
+endif()
+
 set(LLM630_DEPLOY_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/llm630_deploy.cmake")
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/DeployToDevice.cmake.in"
