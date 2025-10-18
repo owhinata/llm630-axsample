@@ -24,7 +24,6 @@ struct Allocation {
   size_t size;
   CacheMode mode;
   mutable std::mutex mtx;
-  int open_maps;
   std::vector<ViewEntry> views;
   bool owned;
   void* base_vir;
@@ -32,7 +31,6 @@ struct Allocation {
       : phy(0),
         size(0),
         mode(CacheMode::kNonCached),
-        open_maps(0),
         owned(false),
         base_vir(nullptr) {}
 };
@@ -103,48 +101,49 @@ CmmView::operator bool() const {
 }
 
 void CmmView::Reset() {
+  // Thread-safety note: Each CmmView instance should be owned by a single
+  // thread. Concurrent calls to Reset() on the same instance are not supported.
   if (!impl_) return;
-  if (impl_->data) {
-    if (impl_->size <= 0xFFFFFFFFu) {
-      AX_SYS_Munmap(impl_->data, static_cast<AX_U32>(impl_->size));
+
+  // Capture impl_ and set to nullptr immediately to prevent double-free
+  Impl* local_impl = impl_;
+  impl_ = nullptr;
+
+  if (local_impl->data) {
+    if (local_impl->size <= 0xFFFFFFFFu) {
+      AX_SYS_Munmap(local_impl->data, static_cast<AX_U32>(local_impl->size));
     }
-    if (impl_->alloc) {
-      std::lock_guard<std::mutex> lk(impl_->alloc->mtx);
+    if (local_impl->alloc) {
+      std::lock_guard<std::mutex> lk(local_impl->alloc->mtx);
       // remove from registry
-      for (std::vector<ViewEntry>::iterator it = impl_->alloc->views.begin();
-           it != impl_->alloc->views.end(); ++it) {
-        if (it->addr == impl_->data) {
-          impl_->alloc->views.erase(it);
+      for (std::vector<ViewEntry>::iterator it =
+               local_impl->alloc->views.begin();
+           it != local_impl->alloc->views.end(); ++it) {
+        if (it->addr == local_impl->data) {
+          local_impl->alloc->views.erase(it);
           break;
         }
       }
-      if (impl_->alloc->open_maps > 0) {
-        impl_->alloc->open_maps -= 1;
-      }
     }
   }
-  delete impl_;
-  impl_ = nullptr;
-}
-
-bool CmmView::Flush() {
-  if (!impl_ || !impl_->data) return false;
-  return Flush(0, impl_->size);
-}
-
-bool CmmView::Flush(size_t offset) {
-  if (!impl_ || !impl_->data) return false;
-  if (offset >= impl_->size) return false;
-  return Flush(offset, impl_->size - offset);
+  delete local_impl;
 }
 
 bool CmmView::Flush(size_t offset, size_t size) {
   if (!impl_ || !impl_->alloc || !impl_->data) return false;
   if (offset >= impl_->size) return false;
-  if (size == 0 || offset + size > impl_->size) return false;
+
+  // Handle SIZE_MAX: flush to end of view
+  size_t actual_size = size;
+  if (size == SIZE_MAX || offset + size > impl_->size) {
+    actual_size = impl_->size - offset;
+  }
+
+  if (actual_size == 0) return false;
+
   AX_U64 phys = impl_->alloc->phy + impl_->offset + offset;
   uintptr_t v = reinterpret_cast<uintptr_t>(impl_->data) + offset;
-  size_t remain = size;
+  size_t remain = actual_size;
   while (remain > 0) {
     AX_U32 chunk =
         remain > 0xFFFFFFFFu ? 0xFFFFFFFFu : static_cast<AX_U32>(remain);
@@ -157,24 +156,21 @@ bool CmmView::Flush(size_t offset, size_t size) {
   return true;
 }
 
-bool CmmView::Invalidate() {
-  if (!impl_ || !impl_->data) return false;
-  return Invalidate(0, impl_->size);
-}
-
-bool CmmView::Invalidate(size_t offset) {
-  if (!impl_ || !impl_->data) return false;
-  if (offset >= impl_->size) return false;
-  return Invalidate(offset, impl_->size - offset);
-}
-
 bool CmmView::Invalidate(size_t offset, size_t size) {
   if (!impl_ || !impl_->alloc || !impl_->data) return false;
   if (offset >= impl_->size) return false;
-  if (size == 0 || offset + size > impl_->size) return false;
+
+  // Handle SIZE_MAX: invalidate to end of view
+  size_t actual_size = size;
+  if (size == SIZE_MAX || offset + size > impl_->size) {
+    actual_size = impl_->size - offset;
+  }
+
+  if (actual_size == 0) return false;
+
   AX_U64 phys = impl_->alloc->phy + impl_->offset + offset;
   uintptr_t v = reinterpret_cast<uintptr_t>(impl_->data) + offset;
-  size_t remain = size;
+  size_t remain = actual_size;
   while (remain > 0) {
     AX_U32 chunk =
         remain > 0xFFFFFFFFu ? 0xFFFFFFFFu : static_cast<AX_U32>(remain);
@@ -197,24 +193,33 @@ CmmView CmmView::MapView(size_t offset, size_t size, CacheMode mode) const {
   void* v = DoMmap(a.phy + abs_off, size, mode);
   if (!v) return CmmView();
 
-  {
+  // Exception-safe: use unique_ptr until fully constructed
+  std::unique_ptr<CmmView::Impl> vi(new CmmView::Impl());
+  vi->alloc = impl_->alloc;
+  vi->data = v;
+  vi->size = size;
+  vi->offset = abs_off;
+  vi->mode = mode;
+
+  // Register view - if this throws, vi destructor won't unmap (data not yet
+  // owned) So we need try-catch
+  try {
     std::lock_guard<std::mutex> lk(a.mtx);
-    a.open_maps += 1;
     ViewEntry e;
     e.addr = v;
     e.size = size;
     e.offset = abs_off;
     e.mode = mode;
     a.views.push_back(e);
+  } catch (...) {
+    // Clean up the mmap on exception
+    if (size <= 0xFFFFFFFFu) {
+      AX_SYS_Munmap(v, static_cast<AX_U32>(size));
+    }
+    throw;
   }
 
-  CmmView::Impl* vi = new CmmView::Impl();
-  vi->alloc = impl_->alloc;
-  vi->data = v;
-  vi->size = size;
-  vi->offset = abs_off;
-  vi->mode = mode;
-  return CmmView(vi);
+  return CmmView(vi.release());
 }
 
 CmmView CmmView::MapViewFast(size_t offset, size_t size, CacheMode mode) const {
@@ -226,24 +231,32 @@ CmmView CmmView::MapViewFast(size_t offset, size_t size, CacheMode mode) const {
   void* v = DoMmapFast(a.phy + abs_off, size, mode);
   if (!v) return CmmView();
 
-  {
+  // Exception-safe: use unique_ptr until fully constructed
+  std::unique_ptr<CmmView::Impl> vi(new CmmView::Impl());
+  vi->alloc = impl_->alloc;
+  vi->data = v;
+  vi->size = size;
+  vi->offset = abs_off;
+  vi->mode = mode;
+
+  // Register view - if this throws, clean up the mmap
+  try {
     std::lock_guard<std::mutex> lk(a.mtx);
-    a.open_maps += 1;
     ViewEntry e;
     e.addr = v;
     e.size = size;
     e.offset = abs_off;
     e.mode = mode;
     a.views.push_back(e);
+  } catch (...) {
+    // Clean up the mmap on exception
+    if (size <= 0xFFFFFFFFu) {
+      AX_SYS_Munmap(v, static_cast<AX_U32>(size));
+    }
+    throw;
   }
 
-  CmmView::Impl* vi = new CmmView::Impl();
-  vi->alloc = impl_->alloc;
-  vi->data = v;
-  vi->size = size;
-  vi->offset = abs_off;
-  vi->mode = mode;
-  return CmmView(vi);
+  return CmmView(vi.release());
 }
 
 void CmmView::Dump(uintptr_t offset) const {
@@ -299,7 +312,9 @@ CmmBuffer::~CmmBuffer() {
 }
 
 CmmView CmmBuffer::Allocate(size_t size, CacheMode mode, const char* token) {
-  if (!impl_) return CmmView();
+  if (!impl_) {
+    impl_ = new Impl();
+  }
   {
     std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
     if (impl_->alloc) {
@@ -323,25 +338,38 @@ CmmView CmmBuffer::Allocate(size_t size, CacheMode mode, const char* token) {
     if (ret != 0) {
       return CmmView();
     }
-    Allocation* a = new Allocation();
+    // Exception-safe: use unique_ptr until fully constructed
+    std::unique_ptr<Allocation> a(new Allocation());
     a->phy = phy;
     a->size = size;
     a->mode = mode;
     a->owned = true;
     a->base_vir = vir;
-    impl_->alloc = std::shared_ptr<Allocation>(a, [](Allocation* p) {
-      if (!p) return;
-      if (p->owned && p->phy != 0) {
-        AX_S32 r = AX_SYS_MemFree(p->phy, p->base_vir);
-        if (r != 0) {
-          printf(
-              "[CmmBuffer::Deleter] AX_SYS_MemFree failed: 0x%X (phy=0x%" PRIx64
-              ")\n",
-              static_cast<unsigned int>(r), static_cast<uint64_t>(p->phy));
-        }
-      }
-      delete p;
-    });
+
+    // Transfer ownership to shared_ptr with custom deleter
+    // If this throws, unique_ptr will clean up (but won't call AX_SYS_MemFree)
+    // So we need try-catch
+    try {
+      impl_->alloc =
+          std::shared_ptr<Allocation>(a.release(), [](Allocation* p) {
+            if (!p) return;
+            if (p->owned && p->phy != 0) {
+              AX_S32 r = AX_SYS_MemFree(p->phy, p->base_vir);
+              if (r != 0) {
+                printf(
+                    "[CmmBuffer::Deleter] AX_SYS_MemFree failed: 0x%X "
+                    "(phy=0x%" PRIx64 ")\n",
+                    static_cast<unsigned int>(r),
+                    static_cast<uint64_t>(p->phy));
+              }
+            }
+            delete p;
+          });
+    } catch (...) {
+      // shared_ptr construction failed, need to free the allocation
+      AX_SYS_MemFree(phy, vir);
+      throw;
+    }
   }
 
   // create base view by mapping 0..size
@@ -349,45 +377,69 @@ CmmView CmmBuffer::Allocate(size_t size, CacheMode mode, const char* token) {
 }
 
 CmmView CmmBuffer::MapView(size_t offset, size_t size, CacheMode mode) const {
-  if (!impl_ || !impl_->alloc) return CmmView();
-  Allocation& a = *impl_->alloc;
+  if (!impl_) return CmmView();
+
+  // Thread-safe: capture shared_ptr under lock to prevent concurrent
+  // Free/DetachExternal
+  std::shared_ptr<Allocation> alloc_copy;
+  {
+    std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
+    alloc_copy = impl_->alloc;
+  }
+
+  if (!alloc_copy) return CmmView();
+  Allocation& a = *alloc_copy;
   if (offset + size > a.size) return CmmView();
 
   void* v = DoMmap(a.phy + offset, size, mode);
   if (!v) return CmmView();
 
-  {
+  // Exception-safe: use unique_ptr until fully constructed
+  std::unique_ptr<CmmView::Impl> vi(new CmmView::Impl());
+  vi->alloc = alloc_copy;  // Use the captured shared_ptr
+  vi->offset = offset;
+  vi->data = v;
+  vi->size = size;
+  vi->mode = mode;
+
+  // Register view - if this throws, clean up the mmap
+  try {
     std::lock_guard<std::mutex> lk(a.mtx);
-    a.open_maps += 1;
     ViewEntry e;
     e.addr = v;
     e.size = size;
     e.offset = offset;
     e.mode = mode;
     a.views.push_back(e);
+  } catch (...) {
+    // Clean up the mmap on exception
+    if (size <= 0xFFFFFFFFu) {
+      AX_SYS_Munmap(v, static_cast<AX_U32>(size));
+    }
+    throw;
   }
 
-  CmmView::Impl* vi = new CmmView::Impl();
-  vi->alloc = impl_->alloc;
-  vi->offset = offset;
-  vi->data = v;
-  vi->size = size;
-  vi->mode = mode;
-  return CmmView(vi);
+  return CmmView(vi.release());
 }
 
 bool CmmBuffer::AttachExternal(uint64_t phys, size_t size) {
-  if (!impl_) return false;
+  if (!impl_) {
+    impl_ = new Impl();
+  }
   std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
   if (impl_->alloc) {
     return false;
   }
-  std::shared_ptr<Allocation> alloc_holder(new Allocation(),
+  // Exception-safe: construct with unique_ptr first
+  std::unique_ptr<Allocation> a(new Allocation());
+  a->phy = static_cast<AX_U64>(phys);
+  a->size = size;
+  a->mode = CacheMode::kNonCached;
+  a->owned = false;
+
+  // Transfer to shared_ptr
+  std::shared_ptr<Allocation> alloc_holder(a.release(),
                                            [](Allocation* p) { delete p; });
-  alloc_holder->phy = static_cast<AX_U64>(phys);
-  alloc_holder->size = size;
-  alloc_holder->mode = CacheMode::kNonCached;
-  alloc_holder->owned = false;
   impl_->alloc = alloc_holder;
   return true;
 }
@@ -398,17 +450,16 @@ bool CmmBuffer::Free() {
     return false;
   }
   std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
-  std::shared_ptr<Allocation> allocation = impl_->alloc;
-  if (!allocation) {
+  if (!impl_->alloc) {
     printf("[CmmBuffer::Free] no allocation to free\n");
     return false;
   }
-  if (!allocation->owned) {
+  if (!impl_->alloc->owned) {
     printf("[CmmBuffer::Free] buffer does not own memory\n");
     return false;
   }
   // If other references (e.g., CmmView) exist, refuse to free.
-  int64_t refs = allocation.use_count();
+  int64_t refs = impl_->alloc.use_count();
   if (refs > 1) {
     printf("[CmmBuffer::Free] references remain: %" PRId64 "\n", refs);
     return false;
@@ -423,12 +474,11 @@ bool CmmBuffer::DetachExternal() {
     return false;
   }
   std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
-  std::shared_ptr<Allocation> allocation = impl_->alloc;
-  if (!allocation || allocation->owned) {
+  if (!impl_->alloc || impl_->alloc->owned) {
     printf("[CmmBuffer::DetachExternal] no external allocation attached\n");
     return false;
   }
-  int64_t refs = allocation.use_count();
+  int64_t refs = impl_->alloc.use_count();
   if (refs > 1) {
     printf("[CmmBuffer::DetachExternal] references remain: %" PRId64 "\n",
            refs);
@@ -439,21 +489,37 @@ bool CmmBuffer::DetachExternal() {
 }
 
 uint64_t CmmBuffer::Phys() const {
-  if (!impl_ || !impl_->alloc) return 0;
+  if (!impl_) return 0;
+  std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
+  if (!impl_->alloc) return 0;
   return impl_->alloc->phy;
 }
 
 size_t CmmBuffer::Size() const {
-  if (!impl_ || !impl_->alloc) return 0;
+  if (!impl_) return 0;
+  std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
+  if (!impl_->alloc) return 0;
   return impl_->alloc->size;
 }
 
 void CmmBuffer::Dump(uintptr_t offset) const {
-  if (!impl_ || !impl_->alloc) {
+  if (!impl_) {
     printf("[CmmBuffer] empty\n");
     return;
   }
-  const Allocation& a = *impl_->alloc;
+
+  // Thread-safe: capture shared_ptr to prevent concurrent modifications
+  std::shared_ptr<Allocation> alloc_copy;
+  {
+    std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
+    alloc_copy = impl_->alloc;
+  }
+
+  if (!alloc_copy) {
+    printf("[CmmBuffer] empty\n");
+    return;
+  }
+  const Allocation& a = *alloc_copy;
   printf("[CmmBuffer] phy=0x%" PRIx64 ", size=0x%zx, maps=%zu\n",
          static_cast<uint64_t>(a.phy), a.size, a.views.size());
   // ByPhy at base+offset
@@ -479,8 +545,17 @@ void CmmBuffer::Dump(uintptr_t offset) const {
 }
 
 bool CmmBuffer::Verify() const {
-  if (!impl_ || !impl_->alloc) return false;
-  const Allocation& a = *impl_->alloc;
+  if (!impl_) return false;
+
+  // Thread-safe: capture shared_ptr to prevent concurrent modifications
+  std::shared_ptr<Allocation> alloc_copy;
+  {
+    std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
+    alloc_copy = impl_->alloc;
+  }
+
+  if (!alloc_copy) return false;
+  const Allocation& a = *alloc_copy;
   AX_S32 mem_type = 0;
   void* vir_out = nullptr;
   AX_U32 blk_size = 0;
@@ -526,31 +601,49 @@ bool CmmBuffer::Verify() const {
 
 CmmView CmmBuffer::MapViewFast(size_t offset, size_t size,
                                CacheMode mode) const {
-  if (!impl_ || !impl_->alloc) return CmmView();
-  Allocation& a = *impl_->alloc;
+  if (!impl_) return CmmView();
+
+  // Thread-safe: capture shared_ptr under lock to prevent concurrent
+  // Free/DetachExternal
+  std::shared_ptr<Allocation> alloc_copy;
+  {
+    std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
+    alloc_copy = impl_->alloc;
+  }
+
+  if (!alloc_copy) return CmmView();
+  Allocation& a = *alloc_copy;
   if (offset + size > a.size) return CmmView();
 
   void* v = DoMmapFast(a.phy + offset, size, mode);
   if (!v) return CmmView();
 
-  {
+  // Exception-safe: use unique_ptr until fully constructed
+  std::unique_ptr<CmmView::Impl> vi(new CmmView::Impl());
+  vi->alloc = alloc_copy;  // Use the captured shared_ptr
+  vi->offset = offset;
+  vi->data = v;
+  vi->size = size;
+  vi->mode = mode;
+
+  // Register view - if this throws, clean up the mmap
+  try {
     std::lock_guard<std::mutex> lk(a.mtx);
-    a.open_maps += 1;
     ViewEntry e;
     e.addr = v;
     e.size = size;
     e.offset = offset;
     e.mode = mode;
     a.views.push_back(e);
+  } catch (...) {
+    // Clean up the mmap on exception
+    if (size <= 0xFFFFFFFFu) {
+      AX_SYS_Munmap(v, static_cast<AX_U32>(size));
+    }
+    throw;
   }
 
-  CmmView::Impl* vi = new CmmView::Impl();
-  vi->alloc = impl_->alloc;
-  vi->offset = offset;
-  vi->data = v;
-  vi->size = size;
-  vi->mode = mode;
-  return CmmView(vi);
+  return CmmView(vi.release());
 }
 
 std::vector<CmmBuffer::PartitionInfo> CmmBuffer::QueryPartitions() {
@@ -571,8 +664,10 @@ std::vector<CmmBuffer::PartitionInfo> CmmBuffer::QueryPartitions() {
 CmmBuffer CmmView::MakeBuffer() const {
   CmmBuffer buf;
   if (!impl_ || !impl_->alloc) return buf;
-  buf.impl_ = new CmmBuffer::Impl();
-  buf.impl_->alloc = impl_->alloc;
+  // Exception-safe: use unique_ptr
+  std::unique_ptr<CmmBuffer::Impl> impl_ptr(new CmmBuffer::Impl());
+  impl_ptr->alloc = impl_->alloc;
+  buf.impl_ = impl_ptr.release();
   return buf;
 }
 

@@ -12,6 +12,8 @@ enum class CacheMode { kNonCached = 0, kCached = 1 };
 
 class CmmBuffer;  // fwd
 
+// Thread-safety: Each CmmView instance should be owned and accessed by a single
+// thread. The underlying allocation (shared via CmmBuffer) is thread-safe.
 class CmmView {
  public:
   CmmView();
@@ -28,13 +30,12 @@ class CmmView {
   explicit operator bool() const;
   void Reset();
 
-  bool Flush();
-  bool Flush(size_t offset);
-  bool Flush(size_t offset, size_t size);
+  // Flush cache for [offset, offset+size) range. SIZE_MAX means flush to end.
+  bool Flush(size_t offset = 0, size_t size = SIZE_MAX);
 
-  bool Invalidate();
-  bool Invalidate(size_t offset);
-  bool Invalidate(size_t offset, size_t size);
+  // Invalidate cache for [offset, offset+size) range. SIZE_MAX means invalidate
+  // to end.
+  bool Invalidate(size_t offset = 0, size_t size = SIZE_MAX);
 
   // Create an additional view within this view's range.
   // The offset/size are relative to this view, not the allocation base.

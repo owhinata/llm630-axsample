@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include <atomic>
+
 namespace axsys {
 
 // RAII wrapper for AX_SYS_Init/AX_SYS_Deinit.
@@ -21,7 +23,7 @@ class System {
   bool Ok() const;  // true if init succeeded
 
  private:
-  bool ok_;
+  std::atomic<bool> ok_;
 };
 
 }  // namespace axsys
