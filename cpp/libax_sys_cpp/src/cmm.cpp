@@ -273,7 +273,8 @@ void CmmView::Dump(uintptr_t offset) const {
 
 struct CmmBuffer::Impl {
   std::shared_ptr<Allocation> alloc;
-  Impl() {}
+  std::mutex alloc_mtx;
+  Impl() : alloc() {}
 };
 
 CmmBuffer::CmmBuffer() : impl_(new Impl()) {}
@@ -299,46 +300,49 @@ CmmBuffer::~CmmBuffer() {
 
 CmmView CmmBuffer::Allocate(size_t size, CacheMode mode, const char* token) {
   if (!impl_) return CmmView();
-  if (impl_->alloc && impl_->alloc->phy != 0) {
-    return CmmView();
-  }
-  if (size > 0xFFFFFFFFu) {
-    printf("[CmmBuffer::Allocate] size too large (0x%zx)\n", size);
-    return CmmView();
-  }
-  AX_U64 phy = 0;
-  void* vir = nullptr;
-  AX_S32 ret = 0;
-  AX_U32 sz = static_cast<AX_U32>(size);
-  if (mode == CacheMode::kCached) {
-    ret = AX_SYS_MemAllocCached(&phy, &vir, sz, 0x1000,
-                                reinterpret_cast<const AX_S8*>(token));
-  } else {
-    ret = AX_SYS_MemAlloc(&phy, &vir, sz, 0x1000,
-                          reinterpret_cast<const AX_S8*>(token));
-  }
-  if (ret != 0) {
-    return CmmView();
-  }
-  Allocation* a = new Allocation();
-  a->phy = phy;
-  a->size = size;
-  a->mode = mode;
-  a->owned = true;
-  a->base_vir = vir;
-  impl_->alloc = std::shared_ptr<Allocation>(a, [](Allocation* p) {
-    if (!p) return;
-    if (p->owned && p->phy != 0) {
-      AX_S32 r = AX_SYS_MemFree(p->phy, p->base_vir);
-      if (r != 0) {
-        printf(
-            "[CmmBuffer::Deleter] AX_SYS_MemFree failed: 0x%X (phy=0x%" PRIx64
-            ")\n",
-            static_cast<unsigned int>(r), static_cast<uint64_t>(p->phy));
-      }
+  {
+    std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
+    if (impl_->alloc) {
+      return CmmView();
     }
-    delete p;
-  });
+    if (size > 0xFFFFFFFFu) {
+      printf("[CmmBuffer::Allocate] size too large (0x%zx)\n", size);
+      return CmmView();
+    }
+    AX_U64 phy = 0;
+    void* vir = nullptr;
+    AX_S32 ret = 0;
+    const AX_U32 sz = static_cast<AX_U32>(size);
+    if (mode == CacheMode::kCached) {
+      ret = AX_SYS_MemAllocCached(&phy, &vir, sz, 0x1000,
+                                  reinterpret_cast<const AX_S8*>(token));
+    } else {
+      ret = AX_SYS_MemAlloc(&phy, &vir, sz, 0x1000,
+                            reinterpret_cast<const AX_S8*>(token));
+    }
+    if (ret != 0) {
+      return CmmView();
+    }
+    Allocation* a = new Allocation();
+    a->phy = phy;
+    a->size = size;
+    a->mode = mode;
+    a->owned = true;
+    a->base_vir = vir;
+    impl_->alloc = std::shared_ptr<Allocation>(a, [](Allocation* p) {
+      if (!p) return;
+      if (p->owned && p->phy != 0) {
+        AX_S32 r = AX_SYS_MemFree(p->phy, p->base_vir);
+        if (r != 0) {
+          printf(
+              "[CmmBuffer::Deleter] AX_SYS_MemFree failed: 0x%X (phy=0x%" PRIx64
+              ")\n",
+              static_cast<unsigned int>(r), static_cast<uint64_t>(p->phy));
+        }
+      }
+      delete p;
+    });
+  }
 
   // create base view by mapping 0..size
   return MapView(0, size, mode);
@@ -374,35 +378,63 @@ CmmView CmmBuffer::MapView(size_t offset, size_t size, CacheMode mode) const {
 
 bool CmmBuffer::AttachExternal(uint64_t phys, size_t size) {
   if (!impl_) return false;
-  if (!impl_->alloc) {
-    impl_->alloc = std::shared_ptr<Allocation>(new Allocation(),
-                                               [](Allocation* p) { delete p; });
+  std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
+  if (impl_->alloc) {
+    return false;
   }
-  Allocation& a = *impl_->alloc;
-  std::lock_guard<std::mutex> lk(a.mtx);
-  if (a.open_maps != 0) return false;
-  a.phy = static_cast<AX_U64>(phys);
-  a.size = size;
-  a.mode = CacheMode::kNonCached;
-  a.views.clear();
-  a.open_maps = 0;
-  a.owned = false;
+  std::shared_ptr<Allocation> alloc_holder(new Allocation(),
+                                           [](Allocation* p) { delete p; });
+  alloc_holder->phy = static_cast<AX_U64>(phys);
+  alloc_holder->size = size;
+  alloc_holder->mode = CacheMode::kNonCached;
+  alloc_holder->owned = false;
+  impl_->alloc = alloc_holder;
   return true;
 }
 
 bool CmmBuffer::Free() {
-  if (!impl_ || !impl_->alloc) {
+  if (!impl_) {
     printf("[CmmBuffer::Free] no allocation to free\n");
     return false;
   }
+  std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
+  std::shared_ptr<Allocation> allocation = impl_->alloc;
+  if (!allocation) {
+    printf("[CmmBuffer::Free] no allocation to free\n");
+    return false;
+  }
+  if (!allocation->owned) {
+    printf("[CmmBuffer::Free] buffer does not own memory\n");
+    return false;
+  }
   // If other references (e.g., CmmView) exist, refuse to free.
-  int64_t refs = impl_->alloc.use_count();
+  int64_t refs = allocation.use_count();
   if (refs > 1) {
     printf("[CmmBuffer::Free] references remain: %" PRId64 "\n", refs);
     return false;
   }
-  impl_->alloc
-      .reset();  // triggers custom deleter and AX_SYS_MemFree (if owned)
+  impl_->alloc.reset();
+  return true;
+}
+
+bool CmmBuffer::DetachExternal() {
+  if (!impl_) {
+    printf("[CmmBuffer::DetachExternal] no buffer to detach\n");
+    return false;
+  }
+  std::lock_guard<std::mutex> lk(impl_->alloc_mtx);
+  std::shared_ptr<Allocation> allocation = impl_->alloc;
+  if (!allocation || allocation->owned) {
+    printf("[CmmBuffer::DetachExternal] no external allocation attached\n");
+    return false;
+  }
+  int64_t refs = allocation.use_count();
+  if (refs > 1) {
+    printf("[CmmBuffer::DetachExternal] references remain: %" PRId64 "\n",
+           refs);
+    return false;
+  }
+  impl_->alloc.reset();
   return true;
 }
 

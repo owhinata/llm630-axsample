@@ -71,18 +71,21 @@ class CmmBuffer {
   // Allocate ownership and return a base view (offset 0..size)
   CmmView Allocate(size_t size, CacheMode mode, const char* token);
 
+  // Free the allocation (requires no remaining views)
+  bool Free();
+
   // Attach to an external (non-owned) physical range; enables MapView*
   // Free() will only check no open views and reset, without MemFree.
   bool AttachExternal(uint64_t phys, size_t size);
+
+  // Detach from the currently attached external range.
+  bool DetachExternal();
 
   // Create an additional view
   CmmView MapView(size_t offset, size_t size, CacheMode mode) const;
 
   // Create an additional view using AX_SYS_MmapFast/AX_SYS_MmapCacheFast
   CmmView MapViewFast(size_t offset, size_t size, CacheMode mode) const;
-
-  // Free the allocation (requires no remaining views)
-  bool Free();
 
   // Diagnostics
   uint64_t Phys() const;
