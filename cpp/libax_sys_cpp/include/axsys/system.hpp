@@ -1,4 +1,16 @@
-// C++11 interface for AX_SYS lifecycle
+/**
+ * @file system.hpp
+ * @brief C++11 RAII interface for AX_SYS lifecycle.
+ *
+ * Use System to initialize AX_SYS on construction and deinitialize on
+ * destruction. This prevents leaks and guarantees balanced calls.
+ *
+ * @code{.cpp}
+ * axsys::System sys;
+ * if (!sys.Ok()) { return -1; }
+ * // ... use AX_SYS or axsys wrappers ...
+ * @endcode
+ */
 #pragma once
 
 #include <stdint.h>
@@ -7,10 +19,10 @@
 
 namespace axsys {
 
-// RAII wrapper for AX_SYS_Init/AX_SYS_Deinit.
-// - Constructor calls AX_SYS_Init() and records success state.
-// - Destructor calls AX_SYS_Deinit() if initialized.
-// - Non-copyable, movable.
+/**
+ * @brief RAII wrapper for AX_SYS_Init/AX_SYS_Deinit.
+ * @note Non-copyable, movable.
+ */
 class System {
  public:
   System();
@@ -20,7 +32,8 @@ class System {
   System(System&& other) noexcept;
   System& operator=(System&& other) noexcept;
 
-  bool Ok() const;  // true if init succeeded
+  /** @return true if AX_SYS_Init succeeded. */
+  bool Ok() const;
 
  private:
   std::atomic<bool> ok_;

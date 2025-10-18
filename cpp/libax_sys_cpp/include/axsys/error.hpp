@@ -1,10 +1,19 @@
-// Error codes and helpers for axsys C++ API
+/**
+ * @file error.hpp
+ * @brief Error codes and helpers for axsys C++ API.
+ *
+ * The ErrorCode enum defines stable, programmatic categories used by
+ * Result<T>. Convert codes to short messages via ErrorCodeToString().
+ */
 #pragma once
 
 #include <string>
 
 namespace axsys {
 
+/**
+ * @brief Unified error categories for axsys APIs.
+ */
 enum class ErrorCode {
   kSuccess = 0,
 
@@ -37,8 +46,10 @@ enum class ErrorCode {
   kUnknown = 999
 };
 
-// Convert ErrorCode to short, stable English text. The returned string is a
-// static literal and does not require lifetime management.
+/**
+ * @brief Convert ErrorCode to a short English text.
+ * @return Static literal; no lifetime management required.
+ */
 inline const char* ErrorCodeToString(ErrorCode code) {
   switch (code) {
     case ErrorCode::kSuccess:
@@ -84,4 +95,3 @@ inline const char* ErrorCodeToString(ErrorCode code) {
 }
 
 }  // namespace axsys
-
