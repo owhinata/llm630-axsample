@@ -4,10 +4,15 @@
 
 namespace {
 
-/*
- * Case025: MemQueryStatus wrapper test.
+/**
+ * @brief Case025: MemQueryStatus wrapper test.
+ *
  * Purpose:
  * - Exercise CmmBuffer::MemQueryStatus and perform basic sanity checks.
+ * Steps:
+ * - Call MemQueryStatus(&st)
+ * Expected:
+ * - Returns true; total_size >= remain_size.
  */
 TEST(CmmMemQuery, Case025_MemQueryStatus) {
   axsys::CmmBuffer::CmmStatus st;

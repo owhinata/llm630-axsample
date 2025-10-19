@@ -9,11 +9,20 @@ namespace {
 
 using axsys::CacheMode;
 
-/*
- * Case003: Verify/Dump (non-cached virt).
+/**
+ * @brief Case003: Verify/ByVirt on non-cached mapping (Dump parity).
+ *
  * Purpose:
- * - Verify allocation; query ByVirt at base and +0x1000; expect consistent
- *   physical increment.
+ * - Verify allocation and ByVirt consistency on a non-cached mapping and
+ *   exercise Dump semantics.
+ * - CmmView::Dump(offset) must query ByVirt at (virt + offset).
+ * Steps:
+ * - Allocate 1MiB non-cached; call Verify().
+ * - Call v.Dump(0) and v.Dump(0x1000) for diagnostics.
+ * - Query ByVirt at base and +0x1000.
+ * - Compare phys(+0x1000) with phys(base) + 0x1000.
+ * Expected:
+ * - Verify() is true; ByVirt(base/+0x1000) succeeds; phys delta is 0x1000.
  */
 TEST(CmmDumpVerify, Case003_NonCachedVerifyAndByVirt) {
   axsys::CmmBuffer buf;
@@ -23,6 +32,10 @@ TEST(CmmDumpVerify, Case003_NonCachedVerifyAndByVirt) {
 
   // Verify() should succeed
   EXPECT_TRUE(buf.Verify());
+
+  // Diagnostic: Dump uses ByVirt at (virt + offset)
+  v.Dump(0);
+  v.Dump(0x1000);
 
   // ByVirt: base and +0x1000 should resolve and phys should be consistent
   AX_U64 phys0 = 0;
@@ -36,28 +49,61 @@ TEST(CmmDumpVerify, Case003_NonCachedVerifyAndByVirt) {
   EXPECT_EQ(phys0 + 0x1000, phys1);
 }
 
-/*
- * Case003r: Verify that CmmView::Reset unmaps the view.
+/**
+ * @brief Case003r: Reset unmaps the view (ByVirt fails on old VA).
+ *
+ * Purpose:
+ * - Demonstrate that after CmmView::Reset(), the previous virtual address is
+ *   no longer valid: ByVirt on the old pointer must fail.
+ * - Also show Dump semantics: CmmView::Dump(offset) queries ByVirt at
+ *   (virt + offset) before reset.
  * Steps:
- * - Keep base view; save pointer; Reset(); ByVirt on old pointer fails.
+ * - Allocate 1MiB non-cached; obtain base view.
+ * - Call v.Dump(0) (diagnostic) and verify ByVirt(base) succeeds.
+ * - Save base pointer, then call v.Reset().
+ * - Call ByVirt(old_ptr) and expect failure.
+ * Expected:
+ * - Pre-reset: ByVirt(base) succeeds. Post-reset: ByVirt(old_ptr) fails.
  */
 TEST(CmmDumpVerify, Case003r_ResetUnmapsView) {
   axsys::CmmBuffer buf;
   auto r = buf.Allocate(1 * 1024 * 1024, CacheMode::kNonCached, "cmm_003r");
   ASSERT_TRUE(r);
   axsys::CmmView v = r.MoveValue();
+
+  // Pre-reset diagnostics and check
+  v.Dump(0);
+  AX_U64 phys_before = 0;
+  AX_S32 ct_before = 0;
+  ASSERT_EQ(0,
+            AX_SYS_MemGetBlockInfoByVirt(v.Data(), &phys_before, &ct_before));
+
   void* old_v = v.Data();
   v.Reset();
+
+  // After reset, query by old virtual should fail
   AX_U64 phys = 0;
   AX_S32 cache_type = 0;
-  // After reset, query by old virtual should fail
   EXPECT_NE(0, AX_SYS_MemGetBlockInfoByVirt(old_v, &phys, &cache_type));
 }
 
-/*
- * Case017: Block info on cached virtual address.
+/**
+ * @brief Case017: Block info on cached virtual address (Dump/ByVirt parity).
+ *
  * Purpose:
- * - ByVirt on cached view succeeds; Verify() is true.
+ * - Match sample_cmm Case017 semantics. CmmView::Dump must query ByVirt at
+ *   (virt + offset), and CmmBuffer::Dump must query ByPhy at (phys + offset).
+ *   Confirm consistency even on a cached virtual mapping.
+ * Steps:
+ * - Allocate 1MiB (kCached) and MoveValue() base view.
+ * - Call buf.Dump() for ByPhy at base phys (diagnostic).
+ * - Call v.Dump(0) and v.Dump(0x1000) for ByVirt at base and +0x1000
+ * (diagnostic).
+ * - Independently verify ByVirt(base) succeeds and that the phys at
+ *   (base + 0x1000) equals (base_phys + 0x1000).
+ * Expected:
+ * - Verify() is true. ByVirt(base/+0x1000) succeeds and the phys delta equals
+ *   0x1000.
  */
 TEST(CmmDumpVerify, Case017_CachedVirtDumpVerify) {
   axsys::CmmBuffer buf;
@@ -66,15 +112,32 @@ TEST(CmmDumpVerify, Case017_CachedVirtDumpVerify) {
   axsys::CmmView v = r.MoveValue();
   EXPECT_TRUE(buf.Verify());
 
-  AX_U64 phys = 0;
-  AX_S32 cache_type = 0;
-  ASSERT_EQ(0, AX_SYS_MemGetBlockInfoByVirt(v.Data(), &phys, &cache_type));
+  // Diagnostic parity with sample_cmm Case017
+  buf.Dump();
+  v.Dump(0);
+  v.Dump(0x1000);
+
+  // Assert ByVirt(base) and ByVirt(base+0x1000)
+  AX_U64 phys0 = 0, phys1 = 0;
+  AX_S32 ct0 = 0, ct1 = 0;
+  ASSERT_EQ(0, AX_SYS_MemGetBlockInfoByVirt(v.Data(), &phys0, &ct0));
+  void* v_off =
+      reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(v.Data()) + 0x1000);
+  ASSERT_EQ(0, AX_SYS_MemGetBlockInfoByVirt(v_off, &phys1, &ct1));
+  EXPECT_EQ(phys0 + 0x1000, phys1);
 }
 
-/*
- * Case018: Block info on mapped non-cached address.
+/**
+ * @brief Case018: ByVirt on mapped non-cached address (Dump offsets).
+ *
  * Purpose:
- * - ByVirt at 0, +0x1000, +0x11ef succeed; Verify() true.
+ * - Verify ByVirt on multiple offsets for a non-cached mapping, and exercise
+ *   Dump semantics at the same offsets.
+ * Steps:
+ * - Allocate 1MiB non-cached; call v.Dump(0), v.Dump(0x1000), v.Dump(0x11ef).
+ * - Query ByVirt at base, +0x1000, +0x11ef.
+ * Expected:
+ * - All ByVirt queries return 0; phys(base+0x1000) == phys(base)+0x1000.
  */
 TEST(CmmDumpVerify, Case018_MappedNonCachedByVirtOffsets) {
   axsys::CmmBuffer buf;
@@ -82,6 +145,11 @@ TEST(CmmDumpVerify, Case018_MappedNonCachedByVirtOffsets) {
   ASSERT_TRUE(r);
   axsys::CmmView v = r.MoveValue();
   EXPECT_TRUE(buf.Verify());
+
+  // Diagnostic dumps
+  v.Dump(0);
+  v.Dump(0x1000);
+  v.Dump(0x11ef);
 
   AX_U64 p0 = 0, p1 = 0, p2 = 0;
   AX_S32 c0 = 0, c1 = 0, c2 = 0;
@@ -96,10 +164,21 @@ TEST(CmmDumpVerify, Case018_MappedNonCachedByVirtOffsets) {
   EXPECT_LE(p0, p2);
 }
 
-/*
- * Case019: Block info on mapped cached address.
+/**
+ * @brief Case019: ByVirt/ByPhy on cached alias and base (Dump parity).
+ *
  * Purpose:
- * - ByVirt on cached alias/base; ByPhy on phys/base offsets succeed.
+ * - Confirm ByVirt/ByPhy consistency across the base (non-cached) view and a
+ *   cached alias. Exercise Dump semantics for both views and ByPhy offsets.
+ * Steps:
+ * - Allocate 1MiB non-cached; MapView over full range with kCached to get an
+ *   alias view.
+ * - Call base.Dump(0), cache.Dump(0), cache.Dump(0x1000).
+ * - Query ByVirt(base), ByVirt(cache), ByVirt(cache+0x1000).
+ * - Obtain base phys and call ByPhy(phys).
+ * Expected:
+ * - phys(base) == phys(cache); phys(cache+0x1000) == phys(base) + 0x1000;
+ *   ByPhy returns a non-null virt for phys(base).
  */
 TEST(CmmDumpVerify, Case019_MappedCachedAndByPhyOffsets) {
   axsys::CmmBuffer buf;
@@ -109,6 +188,11 @@ TEST(CmmDumpVerify, Case019_MappedCachedAndByPhyOffsets) {
   auto cr = buf.MapView(0, base.Size(), CacheMode::kCached);
   ASSERT_TRUE(cr);
   axsys::CmmView cache = cr.MoveValue();
+
+  // Diagnostic dumps
+  base.Dump(0);
+  cache.Dump(0);
+  cache.Dump(0x1000);
 
   // ByVirt for both cached alias and base
   AX_U64 p_base = 0, p_cache = 0;

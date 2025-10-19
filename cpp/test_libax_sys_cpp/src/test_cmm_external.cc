@@ -11,10 +11,17 @@ static bool FindAnonymous(axsys::CmmBuffer::PartitionInfo* out) {
   return axsys::CmmBuffer::FindAnonymous(out);
 }
 
-/*
- * Case015: External attach + cached/noncached views + Flush.
+/**
+ * @brief Case015: External attach + cached/noncached views + Flush.
+ *
  * Purpose:
- * - Flushing cached alias over external range makes base non-cached equal.
+ * - Ensure cached alias over external PA is visible to non-cached after Flush.
+ * Steps:
+ * - AttachExternal(phys,size=1MiB); MapView(0,size,kNonCached) and kCached.
+ * - memset nc=0xDF; memset cached=0xDE; Flush(cached).
+ * - Compare nc vs cached over full range.
+ * Expected:
+ * - Full-range equality.
  */
 TEST(CmmExternal, Case015_AttachFlushMakesEqual) {
   axsys::CmmBuffer::PartitionInfo part;
@@ -39,10 +46,17 @@ TEST(CmmExternal, Case015_AttachFlushMakesEqual) {
   }
 }
 
-/*
- * Case016: External attach + cached/noncached views + Invalidate.
+/**
+ * @brief Case016: External attach + cached/noncached views + Invalidate.
+ *
  * Purpose:
- * - Invalidating cached alias, then writing base makes both equal.
+ * - Ensure cached alias reflects non-cached writes after Invalidate.
+ * Steps:
+ * - AttachExternal; MapView nc/cached over [0,size].
+ * - memset nc=0xBC; memset cached=0xFA; Invalidate(cached).
+ * - Write nc=0xBB; compare nc vs cached over full range.
+ * Expected:
+ * - Full-range equality.
  */
 TEST(CmmExternal, Case016_AttachInvalidateMakesEqual) {
   axsys::CmmBuffer::PartitionInfo part;
@@ -51,7 +65,7 @@ TEST(CmmExternal, Case016_AttachInvalidateMakesEqual) {
   const uint64_t phys =
       part.phys + static_cast<uint64_t>(part.size_kb) * 1024 - block_size * 2;
 
-  const uint32_t kTests = 3;  // lighter than sample; same behavior
+  const uint32_t kTests = 10;  // lighter than sample; same behavior
   for (uint32_t t = 0; t < kTests; ++t) {
     axsys::CmmBuffer buf;
     ASSERT_TRUE(buf.AttachExternal(phys, block_size));

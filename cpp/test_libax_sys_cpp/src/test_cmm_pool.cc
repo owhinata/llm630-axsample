@@ -8,6 +8,9 @@
 #define AXSYS_HAS_POOL 1
 #endif
 #endif
+#ifndef AXSYS_HAS_POOL
+#define AXSYS_HAS_POOL 0
+#endif
 #include <inttypes.h>
 #include <string.h>
 
@@ -18,13 +21,14 @@ namespace {
  * Purpose:
  * - Acquire a POOL block, write via pool virtual; map phys non-cached and
  *   cached; perform Flush/Invalidate and cleanup.
- * Note:
- * - Skips if POOL headers/APIs are unavailable in this environment.
  */
+// Compile-time guard: if POOL headers are not available, build a skipping test
+#if !AXSYS_HAS_POOL
 TEST(CmmPool, Case020_PoolBlockMapAndCacheOps) {
-#ifndef AXSYS_HAS_POOL
-  GTEST_SKIP() << "POOL headers not available; skipping";
+  GTEST_SKIP() << "POOL headers not available at build time; skipping";
+}
 #else
+TEST(CmmPool, Case020_PoolBlockMapAndCacheOps) {
   AX_POOL_FLOORPLAN_T plan;
   memset(&plan, 0, sizeof(plan));
   plan.CommPool[0].MetaSize = 0x1000;
@@ -34,16 +38,14 @@ TEST(CmmPool, Case020_PoolBlockMapAndCacheOps) {
   snprintf(reinterpret_cast<char*>(plan.CommPool[0].PartitionName),
            sizeof(plan.CommPool[0].PartitionName), "%s", "anonymous");
 
-  if (AX_POOL_Exit() != 0) GTEST_SKIP() << "AX_POOL_Exit failed";
-  if (AX_POOL_SetConfig(&plan) != 0) GTEST_SKIP() << "AX_POOL_SetConfig failed";
-  if (AX_POOL_Init() != 0) GTEST_SKIP() << "AX_POOL_Init failed";
+  // Unconditionally execute against POOL APIs; require success.
+  ASSERT_EQ(0, AX_POOL_Exit()) << "AX_POOL_Exit failed";
+  ASSERT_EQ(0, AX_POOL_SetConfig(&plan)) << "AX_POOL_SetConfig failed";
+  ASSERT_EQ(0, AX_POOL_Init()) << "AX_POOL_Init failed";
 
   AX_U32 blk_size = static_cast<AX_U32>(plan.CommPool[0].BlkSize);
   AX_BLK blk = AX_POOL_GetBlock(AX_INVALID_POOLID, blk_size, nullptr);
-  if (blk == AX_INVALID_BLOCKID) {
-    AX_POOL_Exit();
-    GTEST_SKIP() << "AX_POOL_GetBlock failed";
-  }
+  ASSERT_NE(blk, AX_INVALID_BLOCKID) << "AX_POOL_GetBlock failed";
 
   AX_U64 phys = AX_POOL_Handle2PhysAddr(blk);
   ASSERT_NE(phys, 0u);
@@ -69,7 +71,7 @@ TEST(CmmPool, Case020_PoolBlockMapAndCacheOps) {
   (void)AX_POOL_ReleaseBlock(blk);
   (void)AX_POOL_Exit();
   (void)AX_POOL_Exit();
-#endif
 }
+#endif
 
 }  // namespace

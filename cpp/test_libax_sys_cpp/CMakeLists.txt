@@ -18,6 +18,7 @@ add_executable(test_libax_sys_cpp ${TEST_SOURCES})
 
 target_include_directories(test_libax_sys_cpp PRIVATE
     ${CMAKE_SOURCE_DIR}/ax620e_bsp_sdk/msp/out/arm64_glibc/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_link_directories(test_libax_sys_cpp PRIVATE

@@ -8,10 +8,19 @@ namespace {
 
 using axsys::CacheMode;
 
-/*
- * Case007: MflushCache scaling sizes.
+/**
+ * @brief Case007: MflushCache scaling sizes.
+ *
  * Purpose:
- * - For j=1..32MiB, after Flush, non-cached copy reflects data.
+ * - For sizes j=1..32 MiB, verify that after Flush on a cached source,
+ *   a non-cached destination sees the updated data.
+ * Steps:
+ * - Prepare src(cached) and dst(non-cached) of size j MiB.
+ * - memset src (cached) with a pattern, then Flush() to clean to memory.
+ * - Copy src->dst using non-cached aliases (avoid cached alias for copy).
+ * - Compare full range (aliases).
+ * Expected:
+ * - Full-range equality for each size j.
  */
 TEST(CmmScaling, Case007_FlushScalingSizes) {
   const uint32_t kTests = 32;
@@ -42,10 +51,19 @@ TEST(CmmScaling, Case007_FlushScalingSizes) {
   }
 }
 
-/*
- * Case008: MinvalidateCache scaling sizes.
+/**
+ * @brief Case008: MinvalidateCache scaling sizes.
+ *
  * Purpose:
  * - For j=1..32MiB, after Invalidate, cached dst reflects src data.
+ * Steps:
+ * - Prepare src (non-cached) and dst (cached) views of the same size.
+ * - memset dst (cached) with a pattern, then Flush() to clean to memory.
+ * - Copy src->dst using non-cached aliases (avoid cached alias for copy).
+ * - Invalidate dst (cached) to drop stale lines.
+ * - Compare src vs dst over the full range.
+ * Expected:
+ * - Full-range equality for each size.
  */
 TEST(CmmScaling, Case008_InvalidateScalingSizes) {
   const uint32_t kTests = 32;
@@ -67,6 +85,7 @@ TEST(CmmScaling, Case008_InvalidateScalingSizes) {
     for (uint32_t i = 0; i < 256 && i < sz; ++i) {
       static_cast<uint8_t*>(vdst.Data())[i] = static_cast<uint8_t>(i);
     }
+    ASSERT_TRUE(vdst.Flush());
 
     // Copy into cached dest, then invalidate
     auto s_alias = src.MapView(0, sz, CacheMode::kNonCached);
@@ -75,6 +94,7 @@ TEST(CmmScaling, Case008_InvalidateScalingSizes) {
     axsys::CmmView sa = s_alias.MoveValue();
     axsys::CmmView da = d_alias.MoveValue();
     memcpy(da.Data(), sa.Data(), sz);
+
     ASSERT_TRUE(vdst.Invalidate());
     EXPECT_EQ(memcmp(vsrc.Data(), vdst.Data(), sz), 0);
   }

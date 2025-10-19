@@ -744,7 +744,7 @@ bool CmmBuffer::Verify() const {
     }
     if (!in_range) return false;
   }
-  // Each view virt->phys
+  // Each view: validate virt->phys mapping corresponds to base phys + offset
   std::lock_guard<std::mutex> lk(a.mtx);
   for (size_t i = 0; i < a.views.size(); ++i) {
     const ViewEntry& e = a.views[i];
@@ -752,9 +752,10 @@ bool CmmBuffer::Verify() const {
     if (AX_SYS_MemGetBlockInfoByVirt(e.addr, &phys2, &mem_type) != 0) {
       return false;
     }
-    if (phys2 != a.phy) {  // base phys must match
-      return false;
-    }
+    if (phys2 < a.phy) return false;
+    AX_U64 delta = phys2 - a.phy;
+    if (delta != static_cast<AX_U64>(e.offset)) return false;
+    if (e.offset + e.size > a.size) return false;
   }
   return true;
 }
