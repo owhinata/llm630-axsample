@@ -67,17 +67,16 @@ if(_forward_port STREQUAL "")
     message(STATUS "Configured adb forward tcp:${_forward_port} -> tcp:22")
 endif()
 
-set(_ssh_command "ssh -p ${_forward_port}")
-set(_remote_path "/home/${_host_username}/work/llm630-axsample/")
+set(_ssh_host "ax620e-device")
+set(_remote_path "@PROJECT_SOURCE_DIR@/")
 
-message(STATUS "Synchronising project to ${_remote_path} via rsync")
+message(STATUS "Synchronising project to ${_ssh_host}:${_remote_path} via rsync")
 
 execute_process(
     COMMAND "${RSYNC_EXECUTABLE}" -avz --delete
             --exclude ".git/" --exclude "toolchain/"
-            -e "${_ssh_command}"
             "@PROJECT_SOURCE_DIR@/"
-            "${_host_username}@localhost:${_remote_path}"
+            "${_ssh_host}:${_remote_path}"
     RESULT_VARIABLE _rsync_result
     ERROR_VARIABLE _rsync_error
 )

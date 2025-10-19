@@ -41,26 +41,39 @@
    sudo udevadm control --reload-rules
    sudo udevadm trigger
    ```
-4. Create a user on the device that matches your host username (adjust the password as needed):
-   ```bash
-   adb shell "mkdir -p /home && useradd -m $USER"
-   adb shell "echo '$USER:your_password_here' | chpasswd"
-   ```
-5. Prepare the device for file synchronisation (first-time prerequisites are marked accordingly):
+4. Prepare the device for file synchronisation (first-time prerequisites are marked accordingly):
    ```bash
    adb shell "apt update && apt install -y rsync"   # run once
    adb forward tcp:2222 tcp:22                      # run once
-   adb shell "mkdir -p /home/$USER/work"
+   adb shell "mkdir -p $(pwd)"
    ```
-6. Synchronise the project from the host to the device:
+5. Set up SSH key authentication and SSH config (run once):
    ```bash
-   rsync -avz --delete \
-     --exclude '.git/' --exclude 'toolchain/' \
-     -e 'ssh -p 2222' \
-     "/home/$USER/work/llm630-axsample/" \
-     "$USER@localhost:/home/$USER/work/llm630-axsample/"
+   # Generate SSH key if not already present
+   [ ! -f ~/.ssh/id_ed25519 ] && ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
+
+   # Copy public key to device (default password: root)
+   ssh-copy-id -p 2222 root@localhost
+
+   # Add SSH config entry for the device
+   cat >> ~/.ssh/config << 'EOF'
+Host ax620e-device
+    HostName localhost
+    Port 2222
+    User root
+    IdentityFile ~/.ssh/id_ed25519
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+EOF
+
+   # Verify passwordless authentication works
+   ssh ax620e-device "echo 'SSH key auth working'"
+   ```
+6. Build and deploy to the device:
+   ```bash
+   cmake --install build
    ```
 7. Run the sample on the device:
    ```bash
-   adb shell "cd /home/$USER/work/llm630-axsample/build/cpp/hello_world && ./hello_world"
+   ssh ax620e-device "cd $(pwd)/build/cpp/hello_world && ./hello_world"
    ```

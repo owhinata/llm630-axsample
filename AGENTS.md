@@ -53,3 +53,17 @@
 8. Review Workflow
    - Use Contribution builds to run formatting and linting.
    - For multi-step work, share a plan and report progress briefly.
+
+9. Testing and Deployment
+   - Build, deploy, and run tests on the device with:
+     ```bash
+     cmake -B build -DCMAKE_BUILD_TYPE=Contribution
+     cmake --build build
+     cmake --install build
+     ssh ax620e-device "cd $(pwd)/build/cpp/test_libax_sys_cpp && ./test_libax_sys_cpp"
+     ```
+   - The test suite (`test_libax_sys_cpp`) takes approximately 1 minute
+     to complete and validates CMM buffer allocation, cache operations,
+     and memory mapping functionality.
+   - Ensure SSH key authentication is configured (see README.md step 5)
+     for passwordless deployment.
