@@ -57,14 +57,14 @@
 
    # Add SSH config entry for the device
    cat >> ~/.ssh/config << 'EOF'
-Host ax620e-device
-    HostName localhost
-    Port 2222
-    User root
-    IdentityFile ~/.ssh/id_ed25519
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null
-EOF
+   Host ax620e-device
+       HostName localhost
+       Port 2222
+       User root
+       IdentityFile ~/.ssh/id_ed25519
+       StrictHostKeyChecking no
+       UserKnownHostsFile /dev/null
+   EOF
 
    # Verify passwordless authentication works
    ssh ax620e-device "echo 'SSH key auth working'"
